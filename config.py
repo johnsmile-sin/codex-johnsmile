@@ -27,9 +27,33 @@ SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", None)
 MOCK_MODE = os.getenv("MOCK_MODE", "false").strip().lower() in {"1", "true", "yes", "y", "on"}
 APP_MODE  = os.getenv("APP_MODE", "dev").strip()
 
-# ── 키움 (조회 전용 — 주문 API는 사용 안 함) ──────────────────
-KIWOOM_APP_KEY    = os.getenv("KIWOOM_APP_KEY",    None)
-KIWOOM_SECRET_KEY = os.getenv("KIWOOM_SECRET_KEY", None)
+# ── 키움 (4차: 조회 + 모의투자 전용) ─────────────────────────
+KIWOOM_APP_KEY        = os.getenv("KIWOOM_APP_KEY",         None)
+KIWOOM_SECRET_KEY     = os.getenv("KIWOOM_SECRET_KEY",      None)
+KIWOOM_MOCK_ACCOUNT_NO = os.getenv("KIWOOM_MOCK_ACCOUNT_NO", None)   # 모의투자 계좌번호만 허용
+
+# 투자 모드: "mock"(기본) | "paper"(모의투자 API)
+# "real" 을 입력해도 코드 레벨에서 "mock" 으로 강제 전환됩니다.
+_raw_invest_mode  = os.getenv("KIWOOM_INVEST_MODE", "mock").strip().lower()
+KIWOOM_INVEST_MODE = "paper" if _raw_invest_mode == "paper" else "mock"
+
+# ── 4차 자동매매 안전 스위치 (기본값은 모두 보수적) ───────────
+# analysis_only=True 이면 신호 생성까지만 허용, 주문 객체 생성 금지
+ANALYSIS_ONLY_MODE = os.getenv("ANALYSIS_ONLY_MODE", "true").strip().lower() not in {
+    "0", "false", "no", "n", "off"
+}
+# require_approval=True 이면 order_intent 가 APPROVED 상태일 때만 전송 허용
+REQUIRE_MANUAL_APPROVAL = os.getenv("REQUIRE_MANUAL_APPROVAL", "true").strip().lower() not in {
+    "0", "false", "no", "n", "off"
+}
+# 1일 최대 자동 주문 건수 (0 = 제한 없음)
+MAX_DAILY_AUTO_ORDERS  = int(os.getenv("MAX_DAILY_AUTO_ORDERS",  "3") or "3")
+# 종목당 최대 1회 주문금액 (0 이면 risk_manager 설정값 사용)
+MAX_ORDER_AMOUNT_PER_STOCK = int(os.getenv("MAX_ORDER_AMOUNT_PER_STOCK", "500000") or "0")
+
+# ── 하드코딩 상수 (env 로 변경 불가) ──────────────────────────
+ALLOW_REAL_TRADING   = False   # 실거래 주문 영구 금지
+ALLOW_MARKET_ORDER   = False   # 시장가 자동주문 영구 금지
 
 # ── 네이버 뉴스 ─────────────────────────────────────────────────
 NAVER_CLIENT_ID     = os.getenv("NAVER_CLIENT_ID",     None)
@@ -74,6 +98,29 @@ def is_kiwoom_available() -> bool:
 def is_kiwoom_configured() -> bool:
     """국내주식 조회 API 키 입력 여부."""
     return bool(KIWOOM_APP_KEY and KIWOOM_SECRET_KEY)
+
+
+def is_kiwoom_paper_ready() -> bool:
+    """모의투자 API 사용 조건: 키 있음 + paper 모드 + 계좌번호 있음."""
+    return (
+        KIWOOM_INVEST_MODE == "paper"
+        and bool(KIWOOM_APP_KEY)
+        and bool(KIWOOM_SECRET_KEY)
+        and bool(KIWOOM_MOCK_ACCOUNT_NO)
+    )
+
+
+def get_safety_flags() -> dict:
+    """4차 안전 스위치 상태를 딕셔너리로 반환 (대시보드 표시용)."""
+    return {
+        "analysis_only":       ANALYSIS_ONLY_MODE,
+        "require_approval":    REQUIRE_MANUAL_APPROVAL,
+        "allow_real_trading":  ALLOW_REAL_TRADING,    # 항상 False
+        "allow_market_order":  ALLOW_MARKET_ORDER,    # 항상 False
+        "invest_mode":         KIWOOM_INVEST_MODE,
+        "max_daily_orders":    MAX_DAILY_AUTO_ORDERS,
+        "max_order_amount":    MAX_ORDER_AMOUNT_PER_STOCK,
+    }
 
 
 def is_naver_available() -> bool:
@@ -165,7 +212,43 @@ def show_api_status() -> None:
         )
         + _row("Naver 뉴스",    is_naver_available())
         + _row("OpenDART",      is_dart_available())
+        + _row(
+            "키움 모의투자",
+            is_kiwoom_paper_ready(),
+            "paper 모드 준비됨" if is_kiwoom_paper_ready() else (
+                "키 없음 (Mock)" if not is_kiwoom_configured() else "mock 모드"
+            ),
+        )
         + "</div>"
     )
+
+    # ── 4차 안전 스위치 표시 ──────────────────────────────────
+    flags = get_safety_flags()
+    _color_on  = "#27AE60"
+    _color_off = "#E74C3C"
+
+    def _flag_row(label: str, value: bool, safe_when: bool = True) -> str:
+        is_safe = (value == safe_when)
+        color   = _color_on if is_safe else _color_off
+        text    = "ON" if value else "OFF"
+        return (
+            f"<div style='margin:2px 0;font-size:12px'>"
+            f"<span style='color:{color};font-weight:600'>[{text}]</span> "
+            f"{label}</div>"
+        )
+
+    safety_html = (
+        "<div style='background:#FFF8E1;border-radius:8px;padding:8px 12px;margin-top:6px'>"
+        "<div style='font-size:11px;font-weight:600;color:#7D6608;margin-bottom:4px'>"
+        "🔒 안전 스위치</div>"
+        + _flag_row("분석 전용 모드 (주문 생성 차단)", flags["analysis_only"],    safe_when=True)
+        + _flag_row("수동 승인 필수",                  flags["require_approval"], safe_when=True)
+        + _flag_row("실거래 주문 (항상 차단됨)",       flags["allow_real_trading"], safe_when=False)
+        + f"<div style='font-size:11px;color:#888;margin-top:2px'>"
+        f"모드: {flags['invest_mode'].upper()} · "
+        f"일일 최대 {flags['max_daily_orders']}건</div>"
+        + "</div>"
+    )
+    st.markdown(safety_html, unsafe_allow_html=True)
 
     st.markdown(html, unsafe_allow_html=True)

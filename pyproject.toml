@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "local-stock-assistant"
+version = "0.4.0"
+description = "주식 후보 발굴·분석 도우미 (4차: 제한형 자동매매 준비)"
+requires-python = ">=3.10"
+dependencies = [
+    "streamlit",
+    "supabase",
+    "pandas",
+    "plotly",
+    "python-dotenv",
+    "requests",
+    "finance-datareader",
+    "python-telegram-bot>=21.0",
+]
+
+[project.scripts]
+openclaw = "openclaw.commands:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = [
+    "openclaw*",
+    "services*",
+    "strategy*",
+    "analysis*",
+]
+exclude = [".venv*", "__pycache__*"]

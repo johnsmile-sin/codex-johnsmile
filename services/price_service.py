@@ -153,6 +153,17 @@ def fetch_daily_prices(
     df: pd.DataFrame | None = None
     source = "Mock"
 
+    try:
+        from config import MOCK_MODE
+    except Exception:
+        MOCK_MODE = False
+
+    if MOCK_MODE:
+        from services.kiwoom_data import _mock_daily_prices
+        df = _mock_daily_prices(code, days)
+        df = _add_indicators(df)
+        return df.reset_index(drop=True)
+
     # 1순위: 키움 API
     try:
         from services.kiwoom_data import is_available as kiwoom_ok, get_daily_prices as kiwoom_prices

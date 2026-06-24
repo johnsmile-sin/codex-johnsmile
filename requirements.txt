@@ -7,6 +7,9 @@ requests>=2.31.0
 python-dotenv>=1.0.0
 supabase>=2.3.0
 
+# 텔레그램 봇
+python-telegram-bot>=21.0
+
 # 선택 패키지 (없어도 Mock 모드로 실행 가능)
 # OpenAI 뉴스 요약 기능 사용 시 설치
 openai>=1.12.0

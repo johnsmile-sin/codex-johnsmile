@@ -179,3 +179,264 @@ INSERT INTO stocks (stock_code, stock_name, market, sector) VALUES
     ('005380', '현대차',        'KOSPI',  '자동차')
 ON CONFLICT (stock_code) DO NOTHING;
 */
+
+-- =============================================================
+-- 3차 확장: 모의투자 / 전략 검증 / 백테스트
+-- 실거래 주문 테이블이 아닙니다.
+-- Supabase SQL Editor에서 실행 가능합니다.
+-- =============================================================
+
+CREATE TABLE IF NOT EXISTS virtual_portfolio (
+    id                 BIGSERIAL PRIMARY KEY,
+    portfolio_name     VARCHAR(100) NOT NULL UNIQUE,
+    initial_cash       NUMERIC(18,2) NOT NULL DEFAULT 10000000 CHECK (initial_cash >= 0),
+    cash_balance       NUMERIC(18,2) NOT NULL DEFAULT 10000000 CHECK (cash_balance >= 0),
+    total_asset        NUMERIC(18,2) NOT NULL DEFAULT 10000000 CHECK (total_asset >= 0),
+    total_profit_loss  NUMERIC(18,2) NOT NULL DEFAULT 0,
+    total_return_rate  NUMERIC(10,4) NOT NULL DEFAULT 0,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_virtual_portfolio_name
+    ON virtual_portfolio (portfolio_name);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_virtual_portfolio_updated_at') THEN
+        CREATE TRIGGER trg_virtual_portfolio_updated_at
+            BEFORE UPDATE ON virtual_portfolio
+            FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+    END IF;
+END;
+$$;
+
+CREATE TABLE IF NOT EXISTS virtual_orders (
+    id             BIGSERIAL PRIMARY KEY,
+    portfolio_id   BIGINT NOT NULL REFERENCES virtual_portfolio(id) ON DELETE CASCADE,
+    order_date     DATE NOT NULL DEFAULT CURRENT_DATE,
+    stock_code     VARCHAR(10) NOT NULL,
+    stock_name     VARCHAR(100) NOT NULL,
+    strategy_name  VARCHAR(100),
+    order_type     VARCHAR(20) NOT NULL CHECK (order_type IN ('가상매수', '가상매도')),
+    order_price    NUMERIC(18,2) NOT NULL CHECK (order_price > 0),
+    quantity       INTEGER NOT NULL CHECK (quantity > 0),
+    order_amount   NUMERIC(18,2) NOT NULL CHECK (order_amount >= 0),
+    order_status   VARCHAR(20) NOT NULL DEFAULT '체결'
+                   CHECK (order_status IN ('대기', '체결', '취소', '실패')),
+    reason         TEXT,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_virtual_orders_portfolio_date
+    ON virtual_orders (portfolio_id, order_date DESC);
+
+CREATE INDEX IF NOT EXISTS idx_virtual_orders_stock_date
+    ON virtual_orders (stock_code, order_date DESC);
+
+CREATE INDEX IF NOT EXISTS idx_virtual_orders_strategy_date
+    ON virtual_orders (strategy_name, order_date DESC);
+
+CREATE INDEX IF NOT EXISTS idx_virtual_orders_type_status
+    ON virtual_orders (order_type, order_status);
+
+CREATE TABLE IF NOT EXISTS virtual_positions (
+    id                 BIGSERIAL PRIMARY KEY,
+    portfolio_id       BIGINT NOT NULL REFERENCES virtual_portfolio(id) ON DELETE CASCADE,
+    stock_code         VARCHAR(10) NOT NULL,
+    stock_name         VARCHAR(100) NOT NULL,
+    strategy_name      VARCHAR(100),
+    entry_date         DATE NOT NULL DEFAULT CURRENT_DATE,
+    entry_price        NUMERIC(18,2) NOT NULL CHECK (entry_price > 0),
+    quantity           INTEGER NOT NULL CHECK (quantity > 0),
+    current_price      NUMERIC(18,2) NOT NULL CHECK (current_price >= 0),
+    evaluation_amount  NUMERIC(18,2) NOT NULL DEFAULT 0,
+    profit_loss        NUMERIC(18,2) NOT NULL DEFAULT 0,
+    return_rate        NUMERIC(10,4) NOT NULL DEFAULT 0,
+    stop_loss_price    NUMERIC(18,2) CHECK (stop_loss_price >= 0),
+    target_price       NUMERIC(18,2) CHECK (target_price >= 0),
+    holding_days       INTEGER NOT NULL DEFAULT 0 CHECK (holding_days >= 0),
+    status             VARCHAR(20) NOT NULL DEFAULT '보유'
+                       CHECK (status IN ('보유', '청산', '손절', '익절')),
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_virtual_positions_portfolio_status
+    ON virtual_positions (portfolio_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_virtual_positions_stock
+    ON virtual_positions (stock_code);
+
+CREATE INDEX IF NOT EXISTS idx_virtual_positions_strategy
+    ON virtual_positions (strategy_name);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_virtual_positions_open
+    ON virtual_positions (portfolio_id, stock_code, strategy_name)
+    WHERE status = '보유';
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_virtual_positions_updated_at') THEN
+        CREATE TRIGGER trg_virtual_positions_updated_at
+            BEFORE UPDATE ON virtual_positions
+            FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+    END IF;
+END;
+$$;
+
+CREATE TABLE IF NOT EXISTS strategy_rules (
+    id                   BIGSERIAL PRIMARY KEY,
+    strategy_name        VARCHAR(100) NOT NULL UNIQUE,
+    description          TEXT,
+    min_score            INTEGER NOT NULL DEFAULT 75 CHECK (min_score BETWEEN 0 AND 100),
+    take_profit_rate     NUMERIC(10,4) NOT NULL DEFAULT 8.0,
+    stop_loss_rate       NUMERIC(10,4) NOT NULL DEFAULT -4.0,
+    max_holding_days     INTEGER NOT NULL DEFAULT 20 CHECK (max_holding_days > 0),
+    max_position_amount  NUMERIC(18,2) NOT NULL DEFAULT 2000000 CHECK (max_position_amount >= 0),
+    is_active            BOOLEAN NOT NULL DEFAULT TRUE,
+    rule_json            JSONB NOT NULL DEFAULT '{}'::JSONB,
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_strategy_rules_active
+    ON strategy_rules (is_active);
+
+CREATE INDEX IF NOT EXISTS idx_strategy_rules_json
+    ON strategy_rules USING GIN (rule_json);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_strategy_rules_updated_at') THEN
+        CREATE TRIGGER trg_strategy_rules_updated_at
+            BEFORE UPDATE ON strategy_rules
+            FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+    END IF;
+END;
+$$;
+
+CREATE TABLE IF NOT EXISTS strategy_performance (
+    id                 BIGSERIAL PRIMARY KEY,
+    strategy_name      VARCHAR(100) NOT NULL UNIQUE,
+    total_trades       INTEGER NOT NULL DEFAULT 0 CHECK (total_trades >= 0),
+    win_trades         INTEGER NOT NULL DEFAULT 0 CHECK (win_trades >= 0),
+    lose_trades        INTEGER NOT NULL DEFAULT 0 CHECK (lose_trades >= 0),
+    win_rate           NUMERIC(10,4) NOT NULL DEFAULT 0,
+    avg_return_rate    NUMERIC(10,4) NOT NULL DEFAULT 0,
+    total_return_rate  NUMERIC(10,4) NOT NULL DEFAULT 0,
+    max_drawdown       NUMERIC(10,4) NOT NULL DEFAULT 0,
+    profit_factor      NUMERIC(18,6) NOT NULL DEFAULT 0,
+    updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_strategy_performance_return
+    ON strategy_performance (total_return_rate DESC);
+
+CREATE INDEX IF NOT EXISTS idx_strategy_performance_win_rate
+    ON strategy_performance (win_rate DESC);
+
+CREATE TABLE IF NOT EXISTS backtest_results (
+    id                 BIGSERIAL PRIMARY KEY,
+    strategy_name      VARCHAR(100) NOT NULL,
+    start_date         DATE NOT NULL,
+    end_date           DATE NOT NULL,
+    initial_cash       NUMERIC(18,2) NOT NULL CHECK (initial_cash >= 0),
+    final_asset        NUMERIC(18,2) NOT NULL CHECK (final_asset >= 0),
+    total_return_rate  NUMERIC(10,4) NOT NULL DEFAULT 0,
+    win_rate           NUMERIC(10,4) NOT NULL DEFAULT 0,
+    max_drawdown       NUMERIC(10,4) NOT NULL DEFAULT 0,
+    total_trades       INTEGER NOT NULL DEFAULT 0 CHECK (total_trades >= 0),
+    result_json        JSONB NOT NULL DEFAULT '{}'::JSONB,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CHECK (end_date >= start_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_backtest_results_strategy_date
+    ON backtest_results (strategy_name, start_date DESC, end_date DESC);
+
+CREATE INDEX IF NOT EXISTS idx_backtest_results_return
+    ON backtest_results (total_return_rate DESC);
+
+CREATE INDEX IF NOT EXISTS idx_backtest_results_json
+    ON backtest_results USING GIN (result_json);
+
+CREATE TABLE IF NOT EXISTS risk_settings (
+    id                       BIGSERIAL PRIMARY KEY,
+    max_daily_loss_rate      NUMERIC(10,4) NOT NULL DEFAULT -3.0,
+    max_position_count       INTEGER NOT NULL DEFAULT 5 CHECK (max_position_count > 0),
+    max_position_amount      NUMERIC(18,2) NOT NULL DEFAULT 2000000 CHECK (max_position_amount >= 0),
+    max_single_stock_ratio   NUMERIC(10,4) NOT NULL DEFAULT 20.0
+                             CHECK (max_single_stock_ratio >= 0 AND max_single_stock_ratio <= 100),
+    allow_virtual_trading    BOOLEAN NOT NULL DEFAULT TRUE,
+    allow_real_trading       BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at               TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_risk_settings_flags
+    ON risk_settings (allow_virtual_trading, allow_real_trading);
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_risk_settings_updated_at') THEN
+        CREATE TRIGGER trg_risk_settings_updated_at
+            BEFORE UPDATE ON risk_settings
+            FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+    END IF;
+END;
+$$;
+
+INSERT INTO virtual_portfolio (
+    portfolio_name,
+    initial_cash,
+    cash_balance,
+    total_asset,
+    total_profit_loss,
+    total_return_rate
+) VALUES (
+    '기본 모의투자',
+    10000000,
+    10000000,
+    10000000,
+    0,
+    0
+) ON CONFLICT (portfolio_name) DO NOTHING;
+
+INSERT INTO strategy_rules (
+    strategy_name,
+    description,
+    min_score,
+    take_profit_rate,
+    stop_loss_rate,
+    max_holding_days,
+    max_position_amount,
+    is_active,
+    rule_json
+) VALUES (
+    'v3_score_momentum',
+    '후보 점수와 추세 조건을 활용하는 3차 기본 모의투자 전략',
+    75,
+    8.0,
+    -4.0,
+    20,
+    2000000,
+    TRUE,
+    '{"buy_decisions":["강한 관심","관심"],"sell_decisions":["보류","제외"],"real_order":false}'::JSONB
+) ON CONFLICT (strategy_name) DO NOTHING;
+
+INSERT INTO risk_settings (
+    max_daily_loss_rate,
+    max_position_count,
+    max_position_amount,
+    max_single_stock_ratio,
+    allow_virtual_trading,
+    allow_real_trading
+) SELECT
+    -3.0,
+    5,
+    2000000,
+    20.0,
+    TRUE,
+    FALSE
+WHERE NOT EXISTS (SELECT 1 FROM risk_settings);

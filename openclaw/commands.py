@@ -1,10 +1,15 @@
 """
-openclaw/commands.py v2  –  OpenClaw CLI 명령 인터페이스
+openclaw/commands.py v4  –  OpenClaw CLI 명령 인터페이스
 
 Streamlit 없이 단독 실행 가능합니다.
 실거래 주문 기능은 포함하지 않습니다.
 
-지원 명령:
+⚠️  OpenClaw 권한 범위:
+    - 신호 생성, 조회, 요약만 가능합니다.
+    - 주문 승인 및 브로커 전송은 Streamlit 화면에서 사용자가 직접 수행합니다.
+    - 긴급 중지 ON/OFF는 허용됩니다 (안전 제어 목적).
+
+지원 명령 (v2 기존):
     today_candidates            스캐너 점수 상위 후보 종목 출력
     update_candidates           후보 재스캔 + 일봉 데이터 갱신 + Supabase 저장
     analyze_stock <종목명>      종합 리포트 (일봉 데이터 + 재무 3년 + 뉴스 포함)
@@ -13,6 +18,15 @@ Streamlit 없이 단독 실행 가능합니다.
     refresh_news <종목명>       Naver API 뉴스 갱신 + 저장
     refresh_prices <종목명>     FDR/Kiwoom 일봉 데이터 갱신 + 저장
     save_trade_note <종목명> <메모>  매매 메모 저장
+
+지원 명령 (v4 신규):
+    generate_signals            매수/매도 신호 생성 및 저장
+    pending_orders              승인 대기 주문 후보 목록 조회
+    risk_check                  시스템 리스크 상태 종합 점검
+    safety_status               안전 설정 현황 출력
+    emergency_stop_on           긴급 중지 활성화 (모든 주문 차단)
+    emergency_stop_off          긴급 중지 해제
+    order_logs [N]              최근 주문 로그 출력 (기본: 20건)
 
 주의: 본 도구는 투자 참고용입니다. 수익을 보장하지 않습니다.
 """
@@ -795,12 +809,899 @@ def cmd_save_trade_note(name_or_code: str, note: str) -> None:
     print()
 
 
+def cmd_virtual_summary() -> None:
+    from services.market_data import get_market_data
+    from services.virtual_trading import get_portfolio_snapshot, summarize_strategy_performance
+
+    market_df = get_market_data()
+    snapshot = get_portfolio_snapshot(market_df)
+    positions = snapshot["positions"]
+    perf = summarize_strategy_performance(market_df)
+
+    print()
+    print(_hr())
+    print("  💼 모의투자 요약")
+    print(_hr("-"))
+    print(f"  초기 자금  : {snapshot['initial_cash']:,.0f}원")
+    print(f"  현금       : {snapshot['cash']:,.0f}원")
+    print(f"  평가금액   : {snapshot['market_value']:,.0f}원")
+    print(f"  평가손익   : {snapshot['unrealized_pnl']:+,.0f}원")
+    print(f"  총 수익률  : {snapshot['total_return']:+.2f}%")
+    print(f"  가상 주문  : {len(snapshot['orders'])}건")
+    print(_hr("-"))
+
+    if positions.empty:
+        print("  보유 중인 가상 포지션이 없습니다.")
+    else:
+        print("  보유 포지션")
+        for _, row in positions.iterrows():
+            print(
+                f"  - {row['stock_name']}({row['stock_code']}) "
+                f"{int(row['quantity'])}주 / 수익률 {float(row['return_rate']):+.2f}%"
+            )
+
+    if not perf.empty:
+        print(_hr("-"))
+        print("  전략별 성과")
+        for _, row in perf.iterrows():
+            print(
+                f"  - {row['strategy_name']}: 주문 {int(row['orders'])}건, "
+                f"보유 {int(row['open_positions'])}개, "
+                f"수익률 {float(row['return_rate']):+.2f}%"
+            )
+
+    print(_hr())
+    print("  ※ 실거래 주문이 아니며 virtual_orders 저장소 기준입니다.")
+    print()
+
+
+def cmd_virtual_run() -> None:
+    from services.market_data import get_market_data
+    from strategy.scanner import scan
+    from services.virtual_trading import run_strategy_once
+
+    market_df = get_market_data()
+    scored_df = scan(market_df)
+    result = run_strategy_once(market_df, scored_df)
+
+    print()
+    print(_hr())
+    print("  ⚙️ 모의투자 전략 1회 실행")
+    print(_hr("-"))
+    print(f"  전략명       : {result['strategy_name']}")
+    print(f"  생성 주문 수 : {result['created_count']}건")
+    for order in result["created"]:
+        side = "가상 매수" if order["side"] == "BUY" else "가상 매도"
+        print(
+            f"  - {side}: {order['stock_name']}({order['stock_code']}) "
+            f"{order['quantity']}주 @ {float(order['price']):,.0f}원"
+        )
+    if not result["created"]:
+        print("  생성된 가상 주문이 없습니다.")
+    print(_hr())
+    print("  ※ 키움 주문 API는 호출하지 않았습니다.")
+    print()
+
+
+def cmd_virtual_backtest(days: int = 20) -> None:
+    from services.market_data import get_market_data
+    from strategy.scanner import scan
+    from services.virtual_trading import run_light_backtest
+
+    market_df = get_market_data()
+    scored_df = scan(market_df)
+    result = run_light_backtest(scored_df, days=days)
+
+    print()
+    print(_hr())
+    print(f"  🧪 경량 백테스트 ({days}거래일)")
+    print(_hr("-"))
+    if result.empty:
+        print("  백테스트할 후보 종목이 없습니다.")
+        print(_hr())
+        return
+
+    print(f"  대상 종목   : {len(result)}개")
+    print(f"  평균 수익률 : {float(result['return_rate'].mean()):+.2f}%")
+    print(f"  승률        : {float((result['return_rate'] > 0).mean() * 100):.1f}%")
+    print(_hr("-"))
+    for _, row in result.iterrows():
+        print(
+            f"  - {row['stock_name']}({row['stock_code']}) "
+            f"{int(row['score'])}점 / {row['decision']} / "
+            f"{float(row['return_rate']):+.2f}% / {row['result']}"
+        )
+    print(_hr())
+    print("  ※ 단순 검증용 경량 백테스트이며 수익을 보장하지 않습니다.")
+    print()
+
+
 # ════════════════════════════════════════════════════════════════
 # 비활성화 — 실거래 주문 (절대 활성화 금지)
 # ════════════════════════════════════════════════════════════════
 
-def _DISABLED_place_order(*args, **kwargs) -> None:
-    """실거래 주문 함수 — 비활성화. 절대 호출 금지."""
+def cmd_virtual_portfolio() -> None:
+    """3차 CLI: 가상 포트폴리오 현황을 한국어 텍스트로 출력한다."""
+    from services.market_data import get_market_data
+    from services.virtual_trading import get_portfolio_snapshot
+
+    market_df = get_market_data()
+    snapshot = get_portfolio_snapshot(market_df)
+    positions = snapshot["positions"]
+    orders = snapshot["orders"]
+
+    print()
+    print(_hr())
+    print("  💼 가상 포트폴리오 현황")
+    print(_hr("-"))
+    print("  ※ 실제 주문 기능은 없습니다. 모든 주문은 가상 주문 저장소에만 기록됩니다.")
+    print(f"  초기 자금      : {snapshot['initial_cash']:,.0f}원")
+    print(f"  현금 잔고      : {snapshot['cash']:,.0f}원")
+    print(f"  보유 평가금액  : {snapshot['market_value']:,.0f}원")
+    print(f"  평가손익       : {snapshot['unrealized_pnl']:+,.0f}원")
+    print(f"  실현손익       : {snapshot['realized_pnl']:+,.0f}원")
+    print(f"  총자산         : {snapshot['total_value']:,.0f}원")
+    print(f"  총 수익률      : {snapshot['total_return']:+.2f}%")
+    print(f"  가상 주문 수   : {len(orders)}건")
+    print(_hr("-"))
+    if positions.empty:
+        print("  현재 보유 중인 가상 포지션이 없습니다.")
+    else:
+        print("  보유 포지션")
+        for _, row in positions.iterrows():
+            print(
+                f"  - {row['stock_name']}({row['stock_code']}) "
+                f"{int(row['quantity'])}주 | 평균단가 {float(row['avg_price']):,.0f}원 | "
+                f"현재가 {float(row['current_price']):,.0f}원 | "
+                f"평가손익 {float(row['unrealized_pnl']):+,.0f}원 | "
+                f"수익률 {float(row['return_rate']):+.2f}%"
+            )
+    print(_hr())
+    print("  안내: 이 결과는 모의매매 기준이며 실거래 주문을 실행하지 않습니다.")
+    print()
+
+
+def cmd_run_virtual_trading() -> None:
+    """3차 CLI: 실제 주문 없이 가상 주문만 생성하는 전략 1회 실행."""
+    from services.market_data import get_market_data
+    from strategy.scanner import scan
+    from services.virtual_trading import run_strategy_once
+
+    market_df = get_market_data()
+    scored_df = scan(market_df)
+    result = run_strategy_once(market_df, scored_df)
+
+    print()
+    print(_hr())
+    print("  ▶ 모의매매 전략 1회 실행")
+    print(_hr("-"))
+    print("  ※ 실제 주문 기능은 없습니다. run_virtual_trading은 가상 주문만 생성합니다.")
+    print(f"  전략명        : {result['strategy_name']}")
+    print(f"  생성 주문 수  : {result['created_count']}건")
+    if result["created"]:
+        print("  생성된 가상 주문")
+        for order in result["created"]:
+            side = "가상 매수" if order["side"] == "BUY" else "가상 매도"
+            print(
+                f"  - {side}: {order['stock_name']}({order['stock_code']}) "
+                f"{int(order['quantity'])}주 @ {float(order['price']):,.0f}원 "
+                f"({order.get('status', 'CLOSED')})"
+            )
+    else:
+        print("  이번 실행에서 생성된 가상 주문은 없습니다.")
+    skipped = result.get("skipped", [])
+    if skipped:
+        print("  제외 사유")
+        for item in skipped[:10]:
+            print(f"  - {item}")
+    print(_hr())
+    print("  안내: 키움/증권사 주문 API는 호출하지 않았습니다.")
+    print()
+
+
+def cmd_strategy_performance() -> None:
+    """3차 CLI: 전략 성과 요약. 승률, 누적 수익률, 최대 낙폭 포함."""
+    from analysis.performance_analyzer import summarize_performance
+
+    summary = summarize_performance()
+    total = summary["total"]
+    detail_list = summary["detail_list"]
+
+    print()
+    print(_hr())
+    print("  📊 전략 성과 요약")
+    print(_hr("-"))
+    print("  ※ 실제 주문 기능은 없습니다. 모의매매와 백테스트 기록만 분석합니다.")
+    print(f"  총 거래 수     : {int(total.get('total_trades', 0))}건")
+    print(f"  승률           : {float(total.get('win_rate', 0.0)):.2f}%")
+    print(f"  누적 수익률    : {float(total.get('total_return_rate', 0.0)):+.2f}%")
+    print(f"  최대 낙폭      : {float(total.get('max_drawdown', 0.0)):.2f}%")
+    print(f"  평균 수익률    : {float(total.get('avg_return_rate', 0.0)):+.2f}%")
+    print(f"  손익 합계      : {float(total.get('total_profit_loss', 0.0)):+,.0f}원")
+    print(f"  수익비         : {float(total.get('profit_factor', 0.0)):.2f}")
+    print(_hr("-"))
+    if not detail_list:
+        print("  아직 청산된 모의매매 포지션이 없어 전략별 성과가 없습니다.")
+    else:
+        print("  전략별 상세")
+        for perf in detail_list:
+            print(
+                f"  - {perf['strategy_name']}: 거래 {int(perf.get('total_trades', 0))}건 | "
+                f"승률 {float(perf.get('win_rate', 0.0)):.1f}% | "
+                f"누적 수익률 {float(perf.get('total_return_rate', 0.0)):+.2f}% | "
+                f"최대 낙폭 {float(perf.get('max_drawdown', 0.0)):.2f}%"
+            )
+    print(_hr())
+    print("  안내: 성과 지표는 과거/가상 데이터 기준이며 수익을 보장하지 않습니다.")
+    print()
+
+
+def cmd_backtest_strategy(strategy_name: str) -> None:
+    """3차 CLI: 지정 전략을 최근 180일 기준으로 경량 백테스트한다."""
+    from datetime import timedelta
+    from analysis.backtester import run_backtest
+
+    end_date = date.today()
+    start_date = end_date - timedelta(days=180)
+    result = run_backtest(
+        strategy_name=strategy_name,
+        start_date=str(start_date),
+        end_date=str(end_date),
+        save_result=False,
+    )
+
+    print()
+    print(_hr())
+    print(f"  🧪 전략 백테스트: {strategy_name}")
+    print(_hr("-"))
+    print("  ※ 실제 주문 기능은 없습니다. 과거 데이터 기반 가상 검증만 수행합니다.")
+    print(f"  기간           : {start_date} ~ {end_date}")
+    print(f"  초기 자금      : {float(result['initial_cash']):,.0f}원")
+    print(f"  최종 자산      : {float(result['final_asset']):,.0f}원")
+    print(f"  총 거래 수     : {int(result['total_trades'])}건")
+    print(f"  승률           : {float(result['win_rate']):.2f}%")
+    print(f"  누적 수익률    : {float(result['total_return_rate']):+.2f}%")
+    print(f"  최대 낙폭      : {float(result['max_drawdown']):.2f}%")
+    print(f"  평균 수익률    : {float(result.get('avg_return_rate', 0.0)):+.2f}%")
+    print(f"  수익비         : {float(result.get('profit_factor', 0.0)):.2f}")
+    trades_df = result.get("trades_df")
+    if trades_df is not None and not trades_df.empty:
+        print(_hr("-"))
+        print("  최근 거래 예시")
+        for _, row in trades_df.tail(10).iterrows():
+            print(
+                f"  - {row.get('stock_name', '')}({row.get('stock_code', '')}) | "
+                f"{row.get('entry_date', '')} 진입 → {row.get('exit_date', '')} 청산 | "
+                f"{float(row.get('return_rate', 0.0)):+.2f}% | {row.get('exit_reason', '')}"
+            )
+    else:
+        print("  해당 기간에 백테스트 거래가 발생하지 않았습니다.")
+    print(_hr())
+    print("  안내: 백테스트 결과는 실제 수익을 보장하지 않습니다.")
+    print()
+
+
+def cmd_risk_summary() -> None:
+    """3차 CLI: 현재 모의매매 리스크 상태 요약."""
+    from services.virtual_trading import get_portfolio_snapshot
+    from services.market_data import get_market_data
+    from strategy.risk_manager import (
+        check_max_position_count,
+        check_max_position_amount,
+        check_daily_loss_limit,
+        check_single_stock_ratio,
+    )
+
+    market_df = get_market_data()
+    snapshot = get_portfolio_snapshot(market_df)
+    positions = snapshot["positions"]
+    sample_code = "005930"
+    sample_amount = 1_000_000.0
+    if not positions.empty:
+        sample_code = str(positions.iloc[0]["stock_code"])
+
+    checks = [
+        ("최대 보유 종목 수", check_max_position_count()),
+        ("종목별 최대 투자금", check_max_position_amount(sample_amount)),
+        ("일일 손실 한도", check_daily_loss_limit()),
+        ("단일 종목 비중", check_single_stock_ratio(sample_code, sample_amount, snapshot["total_value"])),
+    ]
+
+    print()
+    print(_hr())
+    print("  🛡 리스크 요약")
+    print(_hr("-"))
+    print("  ※ 실제 주문 기능은 없습니다. 가상 주문 전 리스크 조건만 점검합니다.")
+    print(f"  총자산         : {snapshot['total_value']:,.0f}원")
+    print(f"  현금 잔고      : {snapshot['cash']:,.0f}원")
+    print(f"  보유 종목 수   : {0 if positions.empty else len(positions)}개")
+    print(f"  점검 기준 금액 : {sample_amount:,.0f}원")
+    print(_hr("-"))
+    for name, result in checks:
+        mark = "통과" if result.get("allowed") else "차단"
+        print(f"  - {name}: {mark}")
+        print(f"    {result.get('message', '')}")
+    print(_hr())
+    print("  안내: 리스크 점검은 모의매매 기준이며 실거래 주문을 실행하지 않습니다.")
+    print()
+
+
+# ════════════════════════════════════════════════════════════════
+# v4 신규 명령 1: generate_signals
+# ════════════════════════════════════════════════════════════════
+
+def cmd_generate_signals() -> None:
+    """
+    스캐너 점수를 기반으로 매수/매도 신호를 생성하고 저장합니다.
+    주문 생성은 하지 않으며 신호 생성까지만 수행합니다.
+
+    python -m openclaw.commands generate_signals
+    """
+    from services.market_data import get_market_data
+    from strategy.scanner import scan
+    from strategy.signal_generator import (
+        generate_buy_signals, generate_sell_signals,
+        save_trade_signals, expire_old_signals,
+    )
+    from services.system_settings import get_system_settings
+
+    settings = get_system_settings()
+    e_stop   = settings.get("emergency_stop", False)
+    mode     = settings.get("trading_mode", "analysis_only")
+
+    print()
+    print(_hr())
+    print(f"  📡  신호 생성  ({date.today()})")
+    print(f"  매매 모드: {mode}  |  긴급 중지: {'🔴 활성' if e_stop else '🟢 비활성'}")
+    print(_hr())
+
+    if e_stop:
+        print("  🚨 긴급 중지 상태입니다. 신호 생성이 차단됩니다.")
+        print("     emergency_stop_off 명령으로 긴급 중지를 해제하세요.")
+        print(_hr())
+        print()
+        return
+
+    print("  ⏳ 시장 데이터 로딩 중...")
+    market_df = get_market_data()
+    scored_df = scan(market_df)
+    print(f"  스캐너 완료: {len(scored_df)}개 종목 분석")
+
+    # 만료 처리
+    print("  ⏳ 만료 신호 처리 중...")
+    expire_result = expire_old_signals()
+    expired_count = expire_result.get("expired", 0) if isinstance(expire_result, dict) else 0
+    if expired_count > 0:
+        print(f"  ⏰ 만료 신호 {expired_count}건 처리 완료")
+
+    # 매수 신호 생성
+    print("  ⏳ 매수 신호 생성 중...")
+    buy_signals = generate_buy_signals(market_df, scored_df)
+
+    # 매도 신호 생성
+    print("  ⏳ 매도 신호 생성 중...")
+    sell_signals = generate_sell_signals(market_df)
+
+    all_signals = buy_signals + sell_signals
+
+    if not all_signals:
+        print("  ℹ️  생성된 신호가 없습니다.")
+        print("     점수 기준 미달 또는 보유 종목 없음으로 인해 조건 불충족일 수 있습니다.")
+        print(_hr())
+        print()
+        return
+
+    # 저장
+    print(f"  ⏳ 신호 {len(all_signals)}건 저장 중...")
+    save_result = save_trade_signals(all_signals)
+    saved_count = save_result.get("saved", len(all_signals)) if isinstance(save_result, dict) else len(all_signals)
+
+    _section("생성된 신호 목록", "─")
+    for sig in all_signals:
+        sig_type = sig.get("signal_type", "매수")
+        code     = sig.get("stock_code", "")
+        name     = sig.get("stock_name", code)
+        score    = sig.get("score", 0)
+        decision = sig.get("decision", "")
+        reason   = sig.get("signal_reason", "")
+        icon     = "🟢" if sig_type == "매수" else "🔴"
+        print(f"  {icon} [{sig_type}] {name}({code})  점수 {float(score):.0f}점  [{decision}]")
+        if reason:
+            print(f"       사유: {reason[:70]}")
+
+    print(_hr("-"))
+    print(f"  매수 신호: {len(buy_signals)}건  |  매도 신호: {len(sell_signals)}건  |  저장: {saved_count}건")
+    print()
+    print("  ⚠️  신호는 참고용입니다.")
+    print("     주문 후보 생성은 Streamlit '✅ 주문 승인' 화면에서 진행하세요.")
+    print(f"  ※ {_DISCLAIMER}")
+    print(_hr())
+    print()
+
+
+# ════════════════════════════════════════════════════════════════
+# v4 신규 명령 2: pending_orders
+# ════════════════════════════════════════════════════════════════
+
+def cmd_pending_orders() -> None:
+    """
+    승인 대기 중인 주문 후보 목록을 출력합니다.
+    주문 승인/전송은 Streamlit 화면에서만 가능합니다.
+
+    python -m openclaw.commands pending_orders
+    """
+    from services.order_intent_service import get_order_intents
+
+    print()
+    print(_hr())
+    print(f"  📋  승인 대기 주문 후보  ({date.today()})")
+    print(_hr())
+
+    try:
+        intents = get_order_intents(approval_status="승인대기", limit=20)
+    except Exception as e:
+        intents = []
+        print(f"  ⚠️  조회 실패: {e}")
+
+    if not intents:
+        print("  ℹ️  현재 승인 대기 중인 주문 후보가 없습니다.")
+        print(_hr())
+        print()
+        return
+
+    _section(f"승인 대기 {len(intents)}건", "─")
+    for intent in intents:
+        code      = intent.get("stock_code", "")
+        name      = intent.get("stock_name", code)
+        o_type    = intent.get("order_type", "매수")
+        qty       = int(intent.get("quantity", 0))
+        price     = float(intent.get("price", 0))
+        amount    = float(intent.get("order_amount", qty * price))
+        risk_st   = intent.get("risk_check_status", "미검사")
+        risk_msg  = intent.get("risk_check_message", "")
+        created   = str(intent.get("created_at", ""))[:16]
+        o_icon    = "🟢" if o_type == "매수" else "🔴"
+        risk_icon = {"통과": "✅", "차단": "🚫", "확인필요": "⚠️"}.get(risk_st, "❓")
+
+        print(f"  {o_icon} [{o_type}] {name}({code})")
+        print(f"       수량 {qty:,}주  |  단가 {int(price):,}원  |  금액 {int(amount):,.0f}원")
+        print(f"       리스크: {risk_icon} {risk_st}  |  생성: {created}")
+        if risk_st == "차단" and risk_msg:
+            print(f"       ⛔ {risk_msg[:70]}")
+
+    print(_hr("-"))
+    print("  ⚠️  주문 승인 및 전송은 Streamlit '✅ 주문 승인' 화면에서 진행하세요.")
+    print("     OpenClaw CLI에서는 주문 승인/전송을 지원하지 않습니다.")
+    print(_hr())
+    print()
+
+
+# ════════════════════════════════════════════════════════════════
+# v4 신규 명령 3: risk_check
+# ════════════════════════════════════════════════════════════════
+
+def cmd_risk_check() -> None:
+    """
+    현재 시스템 리스크 상태를 종합 점검합니다.
+
+    python -m openclaw.commands risk_check
+    """
+    from strategy.risk_manager import run_full_risk_check
+    from services.system_settings import get_system_settings
+
+    settings = get_system_settings()
+    e_stop   = settings.get("emergency_stop", False)
+    mode     = settings.get("trading_mode", "analysis_only")
+    max_amt  = settings.get("max_order_amount", 1_000_000)
+    max_loss = settings.get("max_daily_loss_rate", -3.0)
+    max_pos  = settings.get("max_position_count", 5)
+
+    print()
+    print(_hr())
+    print(f"  🛡  리스크 상태 점검  ({date.today()})")
+    print(_hr())
+
+    # 샘플 파라미터로 종합 리스크 검사 실행
+    try:
+        result = run_full_risk_check(
+            stock_code="005930",
+            order_amount=float(max_amt),
+            order_type="매수",
+            price_type="지정가",
+            account_mode="paper",
+        )
+    except Exception as e:
+        print(f"  ❌ 리스크 검사 실행 실패: {e}")
+        print(_hr())
+        print()
+        return
+
+    status   = result.get("status", "확인필요")
+    message  = result.get("message", "")
+    checks   = result.get("checks", [])
+    blocked  = result.get("blocked_checks", [])
+    warnings = result.get("warning_checks", [])
+
+    status_icon = {"통과": "✅", "차단": "🚫", "확인필요": "⚠️"}.get(status, "❓")
+    print(f"  종합 상태: {status_icon} {status}")
+    if message:
+        print(f"  메시지: {message}")
+
+    _section("개별 검사 항목", "─")
+    for chk in checks:
+        chk_name = chk.get("name", "")
+        chk_st   = chk.get("status", "")
+        chk_msg  = chk.get("message", "")
+        chk_icon = {"통과": "✅", "차단": "🚫", "확인필요": "⚠️"}.get(chk_st, "❓")
+        print(f"  {chk_icon} {chk_name}: {chk_st}")
+        if chk_msg:
+            print(f"       {chk_msg[:70]}")
+
+    _section("시스템 설정 요약", "─")
+    print(f"  긴급 중지      : {'🔴 활성 (모든 주문 차단)' if e_stop else '🟢 비활성'}")
+    print(f"  매매 모드      : {mode}")
+    print(f"  실거래 허용    : ⛔ 항상 False (코드 레벨 고정)")
+    print(f"  최대 주문 금액 : {int(max_amt):,.0f}원")
+    print(f"  최대 손실 한도 : {float(max_loss):.1f}%")
+    print(f"  최대 보유 종목 : {int(max_pos)}개")
+
+    if blocked:
+        print(_hr("-"))
+        print(f"  🚫 차단 항목 {len(blocked)}개: {', '.join(str(b) for b in blocked)}")
+    if warnings:
+        print(f"  ⚠️  경고 항목 {len(warnings)}개: {', '.join(str(w) for w in warnings)}")
+
+    print(_hr())
+    print(f"  ※ {_DISCLAIMER}")
+    print(_hr())
+    print()
+
+
+# ════════════════════════════════════════════════════════════════
+# v4 신규 명령 4: safety_status
+# ════════════════════════════════════════════════════════════════
+
+def cmd_safety_status() -> None:
+    """
+    현재 시스템 안전 설정 상태를 출력합니다.
+
+    python -m openclaw.commands safety_status
+    """
+    from services.system_settings import get_system_settings
+
+    s        = get_system_settings()
+    e_stop   = s.get("emergency_stop", False)
+    mode     = s.get("trading_mode", "analysis_only")
+    manual   = s.get("require_manual_approval", True)
+    max_amt  = s.get("max_order_amount", 1_000_000)
+    max_loss = s.get("max_daily_loss_rate", -3.0)
+    max_pos  = s.get("max_position_count", 5)
+    src      = s.get("source", "default")
+    updated  = str(s.get("updated_at", "-") or "-")[:19]
+
+    mode_labels = {
+        "analysis_only": "분석 전용 (신호 생성까지만, 주문 불가)",
+        "paper_trading": "모의투자 (수동 승인 후 모의주문 가능)",
+        "real_ready":    "실거래 준비 (실제 주문은 여전히 차단됨)",
+    }
+
+    print()
+    print(_hr())
+    print(f"  ⚙️  안전 설정 현황  ({date.today()})")
+    print(f"  데이터 출처: {src}  |  최종 수정: {updated}")
+    print(_hr())
+
+    if e_stop:
+        print("  🚨🚨🚨  긴급 중지 활성  🚨🚨🚨")
+        print("  ⛔ 모든 주문 후보 생성 및 전송이 차단됩니다.")
+        print()
+    else:
+        print("  🟢 긴급 중지: 비활성")
+        print()
+
+    print(f"  매매 모드      : {mode_labels.get(mode, mode)}")
+    print(f"  실거래 허용    : ⛔ 항상 False (코드 레벨 고정, 변경 불가)")
+    print(f"  수동 승인 필수 : {'✅ 예' if manual else '⚠️  아니오 (주의!)'}")
+    print(f"  최대 주문 금액 : {int(max_amt):,.0f}원")
+    print(f"  최대 손실 한도 : {float(max_loss):.1f}%")
+    print(f"  최대 보유 종목 : {int(max_pos)}개")
+
+    print(_hr("-"))
+    print("  📌 안내:")
+    print("     - 설정 변경은 Streamlit '⚙️ 안전 설정' 화면에서 진행하세요.")
+    print("     - 긴급 중지 ON/OFF: emergency_stop_on / emergency_stop_off 명령 사용")
+    print("     - 실거래 자동주문은 이 프로젝트에서 지원하지 않습니다.")
+    print(_hr())
+    print()
+
+
+# ════════════════════════════════════════════════════════════════
+# v4 신규 명령 5: emergency_stop_on
+# ════════════════════════════════════════════════════════════════
+
+def cmd_emergency_stop_on() -> None:
+    """
+    긴급 중지를 활성화합니다. 모든 주문 후보 생성 및 전송이 차단됩니다.
+
+    python -m openclaw.commands emergency_stop_on
+    """
+    from services.system_settings import set_emergency_stop, get_system_settings
+
+    print()
+    print(_hr())
+    print("  🚨  긴급 중지 활성화")
+    print(_hr())
+
+    s = get_system_settings()
+    if s.get("emergency_stop", False):
+        print("  ℹ️  이미 긴급 중지가 활성화되어 있습니다.")
+        print(_hr())
+        print()
+        return
+
+    result = set_emergency_stop(True)
+    ok = result.get("success", False) if isinstance(result, dict) else bool(result)
+
+    if ok:
+        print("  ✅ 긴급 중지 활성화 완료")
+        print("  ⛔ 모든 주문 후보 생성 및 전송이 차단됩니다.")
+        print("     해제하려면: python -m openclaw.commands emergency_stop_off")
+    else:
+        err = result.get("error", "알 수 없는 오류") if isinstance(result, dict) else "저장 실패"
+        print(f"  ❌ 긴급 중지 활성화 실패: {err}")
+        print("     data/system_settings.json 또는 Supabase 연결을 확인하세요.")
+
+    print(_hr())
+    print()
+
+
+# ════════════════════════════════════════════════════════════════
+# v4 신규 명령 6: emergency_stop_off
+# ════════════════════════════════════════════════════════════════
+
+def cmd_emergency_stop_off() -> None:
+    """
+    긴급 중지를 해제합니다.
+
+    python -m openclaw.commands emergency_stop_off
+    """
+    from services.system_settings import set_emergency_stop, get_system_settings
+
+    print()
+    print(_hr())
+    print("  🟢  긴급 중지 해제")
+    print(_hr())
+
+    s = get_system_settings()
+    if not s.get("emergency_stop", False):
+        print("  ℹ️  현재 긴급 중지가 비활성 상태입니다. 변경할 필요가 없습니다.")
+        print(_hr())
+        print()
+        return
+
+    print("  ⚠️  긴급 중지를 해제하면 매매 모드에 따라 주문 후보 생성이 가능해집니다.")
+    print("  진행하려면 Enter 를 누르세요. 취소하려면 Ctrl+C 를 누르세요.")
+    try:
+        input("  > ")
+    except KeyboardInterrupt:
+        print("\n  ↩️  취소되었습니다.")
+        print(_hr())
+        print()
+        return
+
+    result = set_emergency_stop(False)
+    ok = result.get("success", False) if isinstance(result, dict) else bool(result)
+
+    if ok:
+        print("  ✅ 긴급 중지 해제 완료")
+        mode = s.get("trading_mode", "analysis_only")
+        print(f"  현재 매매 모드: {mode}")
+        if mode == "analysis_only":
+            print("  ℹ️  분석 전용 모드 — 주문 후보 생성은 여전히 불가합니다.")
+        elif mode == "paper_trading":
+            print("  ℹ️  모의투자 모드 — 주문 후보 생성 후 수동 승인이 필요합니다.")
+        elif mode == "real_ready":
+            print("  ℹ️  실거래 준비 모드 — 실제 주문 전송은 여전히 차단됩니다.")
+    else:
+        err = result.get("error", "알 수 없는 오류") if isinstance(result, dict) else "저장 실패"
+        print(f"  ❌ 긴급 중지 해제 실패: {err}")
+        print("     data/system_settings.json 또는 Supabase 연결을 확인하세요.")
+
+    print(_hr())
+    print()
+
+
+# ════════════════════════════════════════════════════════════════
+# v4 신규 명령 7: order_logs
+# ════════════════════════════════════════════════════════════════
+
+def cmd_order_logs(n: int = 20) -> None:
+    """
+    최근 주문 로그를 출력합니다 (broker_orders + 실행 이벤트 로그).
+
+    python -m openclaw.commands order_logs [N]
+    """
+    import json as _json
+    from pathlib import Path as _Path
+
+    _data_dir = _Path(_ROOT) / "data"
+    _bo_file  = _data_dir / "broker_orders.json"
+    _el_file  = _data_dir / "order_execution_logs.json"
+
+    print()
+    print(_hr())
+    print(f"  📋  최근 주문 로그  ({date.today()})")
+    print(_hr())
+
+    # ── broker_orders ─────────────────────────────────────────
+    broker_orders: list[dict] = []
+    if _bo_file.exists():
+        try:
+            broker_orders = _json.loads(_bo_file.read_text(encoding="utf-8")) or []
+        except Exception:
+            pass
+
+    if not broker_orders:
+        try:
+            from services.supabase_client import get_client, is_connected
+            if is_connected():
+                rows = (
+                    get_client()
+                    .table("broker_orders")
+                    .select("*")
+                    .order("created_at", desc=True)
+                    .limit(n)
+                    .execute()
+                    .data or []
+                )
+                broker_orders = rows
+        except Exception:
+            pass
+
+    _section(f"브로커 주문 (최근 {n}건)", "─")
+    if not broker_orders:
+        print("  ℹ️  주문 기록이 없습니다.")
+    else:
+        _bo_icon = {
+            "전송대기": "⏳", "전송완료": "📤", "전량체결": "✅",
+            "일부체결": "🔶", "취소": "❌", "실패": "💥",
+        }
+        for order in sorted(
+            broker_orders,
+            key=lambda x: x.get("created_at", ""),
+            reverse=True,
+        )[:n]:
+            code      = order.get("stock_code", "")
+            name      = order.get("stock_name", code)
+            o_type    = order.get("order_type", "")
+            qty       = int(order.get("quantity", 0))
+            price     = float(order.get("price", 0))
+            status    = order.get("order_status", "")
+            mode      = order.get("account_mode", "")
+            broker_no = order.get("broker_order_no", "-")
+            created   = str(order.get("created_at", ""))[:16]
+            s_icon    = _bo_icon.get(status, "❓")
+            print(
+                f"  {s_icon} [{status}] {o_type} {name}({code}) "
+                f"{qty:,}주 @ {int(price):,}원"
+            )
+            print(f"       모드:{mode}  주문번호:{broker_no}  생성:{created}")
+
+    # ── 실행 이벤트 로그 ──────────────────────────────────────
+    exec_logs: list[dict] = []
+    if _el_file.exists():
+        try:
+            exec_logs = _json.loads(_el_file.read_text(encoding="utf-8")) or []
+        except Exception:
+            pass
+
+    if not exec_logs:
+        try:
+            from services.supabase_client import get_client, is_connected
+            if is_connected():
+                rows = (
+                    get_client()
+                    .table("order_execution_logs")
+                    .select("*")
+                    .order("created_at", desc=True)
+                    .limit(min(n, 30))
+                    .execute()
+                    .data or []
+                )
+                exec_logs = rows
+        except Exception:
+            pass
+
+    _section(f"실행 이벤트 로그 (최근 {min(n, 30)}건)", "─")
+    _el_icon = {
+        "ORDER_SENT":   "📤",
+        "ORDER_FAILED": "💥",
+        "CANCEL_SENT":  "🚫",
+        "SEND_ATTEMPT": "⏳",
+        "SEND_BLOCKED": "⛔",
+        "STATUS_QUERY": "🔍",
+        "CANCEL_FAILED":"⚠️",
+    }
+    if not exec_logs:
+        print("  ℹ️  실행 이벤트 로그가 없습니다.")
+    else:
+        for log in sorted(
+            exec_logs,
+            key=lambda x: x.get("created_at", ""),
+            reverse=True,
+        )[:min(n, 30)]:
+            evt    = log.get("event_type", "")
+            msg    = log.get("message", "")
+            logged = str(log.get("created_at", ""))[:16]
+            e_icon = _el_icon.get(evt, "📝")
+            print(f"  {e_icon} [{evt}] {logged}  {msg[:65]}")
+
+    print(_hr())
+    print()
+
+
+# ════════════════════════════════════════════════════════════════
+# 텔레그램 명령
+# ════════════════════════════════════════════════════════════════
+
+def cmd_bot_start() -> None:
+    """
+    텔레그램 양방향 봇을 시작합니다 (blocking polling).
+
+    openclaw bot_start
+    """
+    from services.telegram_bot import run_bot
+    run_bot()
+
+
+def cmd_notify(message: str) -> None:
+    """
+    텔레그램으로 메시지를 전송합니다.
+
+    openclaw notify "<메시지>"
+    """
+    from services.telegram_notifier import send_message, is_available
+
+    if not is_available():
+        print("\n❌ TELEGRAM_BOT_TOKEN 또는 TELEGRAM_CHAT_ID 가 .env 에 설정되지 않았습니다.")
+        print("   .env 파일에 TELEGRAM_BOT_TOKEN 과 TELEGRAM_CHAT_ID 를 추가하세요.\n")
+        return
+
+    ok = send_message(message)
+    if ok:
+        print(f"\n✅ 텔레그램 전송 완료: {message[:60]}\n")
+    else:
+        print("\n❌ 전송 실패. 토큰·채팅 ID·인터넷 연결을 확인하세요.\n")
+
+
+def cmd_notify_test() -> None:
+    """
+    텔레그램 연결 테스트 메시지를 전송합니다.
+
+    openclaw notify_test
+    """
+    from services.telegram_notifier import send_message, is_available
+
+    if not is_available():
+        print("\n❌ TELEGRAM_BOT_TOKEN 또는 TELEGRAM_CHAT_ID 가 미설정입니다.\n")
+        return
+
+    from datetime import datetime
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    text = (
+        f"✅ <b>[연결 테스트]</b> local-stock-assistant\n"
+        f"텔레그램 봇 연결이 정상입니다.\n"
+        f"시각: {now}"
+    )
+    ok = send_message(text)
+    if ok:
+        print("\n✅ 텔레그램 테스트 메시지 전송 성공!\n")
+    else:
+        print("\n❌ 전송 실패. 토큰·채팅 ID·인터넷 연결을 확인하세요.\n")
+
+
+def _raise_unsupported_trading_action(*args, **kwargs) -> None:
+    """미지원 거래 액션 가드."""
     raise NotImplementedError(
         "실거래 주문 기능은 이 프로젝트에서 지원하지 않습니다.\n"
         "본 도구는 분석 및 참고 목적으로만 사용합니다."
@@ -814,10 +1715,10 @@ def _DISABLED_place_order(*args, **kwargs) -> None:
 def _print_help() -> None:
     print()
     print(_hr())
-    print("  📈  OpenClaw v2  –  local-stock-assistant CLI")
+    print("  📈  OpenClaw v4  –  local-stock-assistant CLI")
     print(_hr())
 
-    cmds = [
+    base_cmds = [
         ("today_candidates [N]",
          "스캐너 점수 상위 N개 후보 종목 출력 (기본값: 10)"),
         ("update_candidates",
@@ -835,14 +1736,64 @@ def _print_help() -> None:
         ('save_trade_note <종목명> "<메모>"',
          "매매 메모 저장"),
     ]
-    for cmd_str, desc in cmds:
+    print("  ── 분석/데이터 명령 ──")
+    for cmd_str, desc in base_cmds:
         print(f"  python -m openclaw.commands {cmd_str}")
+        print(f"      {desc}")
+        print()
+
+    v4_cmds = [
+        ("generate_signals",
+         "스캐너 점수 기반 매수/매도 신호 생성 및 저장"),
+        ("pending_orders",
+         "승인 대기 주문 후보 목록 조회 (승인은 Streamlit 에서)"),
+        ("risk_check",
+         "시스템 리스크 상태 종합 점검 (10개 검사 항목)"),
+        ("safety_status",
+         "안전 설정 현황 출력 (긴급 중지, 매매 모드, 한도 등)"),
+        ("emergency_stop_on",
+         "긴급 중지 활성화 — 모든 주문 후보 생성 및 전송 즉시 차단"),
+        ("emergency_stop_off",
+         "긴급 중지 해제 (확인 프롬프트 필요)"),
+        ("order_logs [N]",
+         "최근 주문 로그 출력: 브로커 주문 + 실행 이벤트 (기본: 20건)"),
+    ]
+    print("  ── v4 신규: 신호/주문/안전 명령 ──")
+    for cmd_str, desc in v4_cmds:
+        print(f"  python -m openclaw.commands {cmd_str}")
+        print(f"      {desc}")
+        print()
+
+    virtual_cmds = [
+        ("virtual_portfolio", "가상 포트폴리오, 현금, 보유 종목, 수익률 출력"),
+        ("run_virtual_trading", "실제 주문 없이 가상 매수/매도 주문만 1회 생성"),
+        ("strategy_performance", "전략 성과 요약: 승률, 누적 수익률, 최대 낙폭"),
+        ('backtest_strategy "<전략명>"', "지정 전략을 최근 180일 기준으로 백테스트"),
+        ("risk_summary", "가상 주문 전 리스크 조건 요약"),
+        ("virtual_summary", "모의투자 포트폴리오, 주문, 전략 성과 요약"),
+        ("virtual_run", "후보 종목 조건에 따라 가상 매수/매도 1회 실행"),
+        ("virtual_backtest [일수]", "후보 점수 기반 경량 백테스트 실행"),
+    ]
+    print("  ── 모의투자/백테스트 명령 ──")
+    for cmd_str, desc in virtual_cmds:
+        print(f"  python -m openclaw.commands {cmd_str}")
+        print(f"      {desc}")
+        print()
+
+    telegram_cmds = [
+        ("bot_start",         "텔레그램 양방향 봇 시작 (Ctrl+C 로 종료)"),
+        ('notify "<메시지>"', "텔레그램으로 메시지 전송"),
+        ("notify_test",       "텔레그램 연결 테스트 메시지 전송"),
+    ]
+    print("  ── 텔레그램 명령 ──")
+    for cmd_str, desc in telegram_cmds:
+        print(f"  openclaw {cmd_str}")
         print(f"      {desc}")
         print()
 
     print(_hr("-"))
     print("  ⛔ 실거래 주문 기능은 지원하지 않습니다.")
-    print("     본 도구는 분석 참고용으로만 사용하세요.")
+    print("     주문 승인/전송은 Streamlit '✅ 주문 승인' 화면에서 직접 진행하세요.")
     print()
     print("  ⚠️  API 키가 없으면 Mock 데이터로 실행됩니다.")
     print("     .env 파일에 DART_API_KEY, NAVER_CLIENT_ID, SUPABASE_URL 등을")
@@ -920,6 +1871,71 @@ def main(argv: list[str] | None = None) -> None:
         name = args[1]
         note = " ".join(args[2:])
         cmd_save_trade_note(name, note)
+
+    elif cmd in ("virtual_portfolio",):
+        cmd_virtual_portfolio()
+
+    elif cmd in ("run_virtual_trading",):
+        cmd_run_virtual_trading()
+
+    elif cmd in ("strategy_performance",):
+        cmd_strategy_performance()
+
+    elif cmd in ("backtest_strategy",):
+        if len(args) < 2:
+            print('\n사용법: backtest_strategy "<전략명>"\n')
+            print('예시: python -m openclaw.commands backtest_strategy "거래량 급증 모멘텀"\n')
+            return
+        cmd_backtest_strategy(" ".join(args[1:]))
+
+    elif cmd in ("risk_summary",):
+        cmd_risk_summary()
+
+    elif cmd in ("virtual_summary", "paper_summary", "portfolio"):
+        cmd_virtual_summary()
+
+    elif cmd in ("virtual_run", "paper_run"):
+        cmd_run_virtual_trading()
+
+    elif cmd in ("virtual_backtest", "paper_backtest", "backtest"):
+        days = int(args[1]) if len(args) > 1 and args[1].isdigit() else 20
+        cmd_virtual_backtest(days)
+
+    # ── v4 신규 명령 ─────────────────────────────────────────────
+    elif cmd in ("generate_signals", "signals"):
+        cmd_generate_signals()
+
+    elif cmd in ("pending_orders", "pending"):
+        cmd_pending_orders()
+
+    elif cmd in ("risk_check", "riskcheck"):
+        cmd_risk_check()
+
+    elif cmd in ("safety_status", "safety"):
+        cmd_safety_status()
+
+    elif cmd in ("emergency_stop_on", "estop_on", "stop_on"):
+        cmd_emergency_stop_on()
+
+    elif cmd in ("emergency_stop_off", "estop_off", "stop_off"):
+        cmd_emergency_stop_off()
+
+    elif cmd in ("order_logs", "logs"):
+        n = int(args[1]) if len(args) > 1 and args[1].isdigit() else 20
+        cmd_order_logs(n)
+
+    # ── 텔레그램 명령 ─────────────────────────────────────────────
+    elif cmd in ("bot_start", "bot", "telegram"):
+        cmd_bot_start()
+
+    elif cmd in ("notify",):
+        if len(args) < 2:
+            print('\n사용법: notify "<메시지 내용>"\n')
+            return
+        cmd_notify(" ".join(args[1:]))
+
+    elif cmd in ("notify_test", "test_notify"):
+        cmd_notify_test()
 
     elif cmd in ("help", "--help", "-h"):
         _print_help()

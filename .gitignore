@@ -85,3 +85,18 @@ desktop.ini
 output/
 reports/
 exports/
+data/virtual_orders.json
+data/virtual_positions.json
+data/virtual_portfolio.json
+data/backtest_results.json
+data/strategy_performance.json
+
+# ─── 4차: 키움 연동 관련 로컬 캐시 ──────────────────────────
+data/trade_signals.json
+data/order_intents.json
+data/order_logs.json
+data/order_execution_logs.json
+data/broker_orders.json
+data/system_settings.json
+data/emergency_stop.json
+data/kiwoom_account_cache.json

@@ -240,6 +240,13 @@ def get_market_data(force_mock: bool = False) -> pd.DataFrame:
     """
     if not force_mock:
         try:
+            from config import MOCK_MODE
+            force_mock = bool(MOCK_MODE)
+        except Exception:
+            force_mock = False
+
+    if not force_mock:
+        try:
             from services.data_providers.fdr_provider import is_available, fetch_all_stocks
             if is_available():
                 logger.info("[market_data] FDR 실제 데이터 로드 시도...")

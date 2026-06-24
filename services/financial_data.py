@@ -225,26 +225,32 @@ def _dart_fetch_year(corp_code: str, bsns_year: str, api_key: str) -> dict | Non
             if not items:
                 continue
 
-            # 계정과목 → 금액 매핑 (단위: 원 → 억원 변환)
-            acc: dict[str, float] = {}
+            # 계정과목 → 내부 키 매핑 (단위: 원 → 억원 변환)
+            # 첫 번째 유효(비제로) 값만 사용해 서브항목 덮어쓰기 방지
             _ACCOUNT_MAP = {
-                "매출액":    "revenue",
-                "영업수익":  "revenue",        # 금융사 대체 계정
-                "영업이익":  "operating_profit",
-                "당기순이익": "net_profit",
-                "자본총계":  "equity",
-                "부채총계":  "liabilities",
-                "유동자산":  "current_assets",
-                "유동부채":  "current_liabilities",
+                "매출액":          "revenue",
+                "영업수익":        "revenue",        # 금융사 대체 계정
+                "영업이익":        "operating_profit",
+                "영업이익(손실)":   "operating_profit",
+                "당기순이익":      "net_profit",
+                "당기순이익(손실)": "net_profit",
+                "자본총계":        "equity",
+                "부채총계":        "liabilities",
+                "유동자산":        "current_assets",
+                "유동부채":        "current_liabilities",
             }
+            acc: dict[str, float] = {}
             for item in items:
                 acnt = item.get("account_nm", "")
-                val  = str(item.get("thstrm_amount", "")).replace(",", "").strip()
-                if acnt in _ACCOUNT_MAP:
-                    try:
-                        acc[_ACCOUNT_MAP[acnt]] = float(val) / 1e8  # 원 → 억원
-                    except ValueError:
-                        pass
+                key  = _ACCOUNT_MAP.get(acnt)
+                if key is None or key in acc:
+                    continue
+                try:
+                    v = float(str(item.get("thstrm_amount", "")).replace(",", "").strip())
+                except (ValueError, TypeError):
+                    continue
+                if v != 0.0:
+                    acc[key] = v / 1e8   # 원 → 억원
 
             # 필수 항목 누락 시 다음 보고서 시도
             if "revenue" not in acc or "equity" not in acc:
@@ -432,9 +438,9 @@ def save_financial_metrics_to_supabase(
                 "stock_code":       stock_code or yr.get("stock_code", ""),
                 "stock_name":       stock_name or yr.get("stock_name", ""),
                 "fiscal_year":      yr["fiscal_year"],
-                "revenue":          yr.get("revenue",           0.0),
-                "operating_profit": yr.get("operating_profit",  0.0),
-                "net_profit":       yr.get("net_profit",        0.0),
+                "revenue":          int(round(yr.get("revenue",           0.0))),
+                "operating_profit": int(round(yr.get("operating_profit",  0.0))),
+                "net_income":       int(round(yr.get("net_profit",        0.0))),
                 "operating_margin": yr.get("operating_margin",  0.0),
                 "net_margin":       yr.get("net_margin",        0.0),
                 "per":              yr.get("per",               0.0),
@@ -499,7 +505,7 @@ def get_financial_metrics_from_supabase(stock_code: str) -> list[dict]:
                     "fiscal_year":      r["fiscal_year"],
                     "revenue":          r.get("revenue",           0.0),
                     "operating_profit": r.get("operating_profit",  0.0),
-                    "net_profit":       r.get("net_profit",        0.0),
+                    "net_profit":       r.get("net_income",        0.0),
                     "operating_margin": r.get("operating_margin",  0.0),
                     "net_margin":       r.get("net_margin",        0.0),
                     "per":              r.get("per",               0.0),
