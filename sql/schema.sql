@@ -73,8 +73,8 @@ CREATE TABLE IF NOT EXISTS news_items (
     stock_name    VARCHAR(100) NOT NULL,
     title         TEXT         NOT NULL,          -- 뉴스 제목
     summary       TEXT,                           -- 요약문
-    sentiment     VARCHAR(20)  NOT NULL DEFAULT '중립적'
-                      CHECK (sentiment IN ('긍정적', '다소 긍정적', '중립적', '다소 부정적', '부정적')),
+    sentiment     VARCHAR(20)  NOT NULL DEFAULT '중립'
+                      CHECK (sentiment IN ('긍정', '중립', '부정')),
     impact_score  SMALLINT     CHECK (impact_score BETWEEN 1 AND 5),  -- 영향도 1~5
     news_date     DATE         NOT NULL DEFAULT CURRENT_DATE,
     url           TEXT,
@@ -103,8 +103,8 @@ CREATE TABLE IF NOT EXISTS stock_reports (
     financial_summary   TEXT,                    -- 재무 요약
     news_summary        TEXT,                    -- 뉴스 요약
     final_decision      VARCHAR(20)  NOT NULL,   -- 매수 검토 | 관망 | 매도 검토
-    target_return       NUMERIC(5,2),            -- 목표 수익률 (%)
-    stop_loss           NUMERIC(5,2),            -- 손절 기준 (%)
+    target_return       TEXT,                    -- 목표 수익률 (예: "+12% 내외")
+    stop_loss           TEXT,                    -- 손절 라인 (예: "74,500원 (-5.0%)")
     entry_timing        TEXT,                    -- 진입 타이밍 설명
     risks               TEXT,                    -- 리스크 요인
     conclusion          TEXT,                    -- 최종 결론
@@ -131,7 +131,7 @@ CREATE TABLE IF NOT EXISTS trade_journal (
     trade_date   DATE          NOT NULL DEFAULT CURRENT_DATE,
     stock_code   VARCHAR(10)   NOT NULL,
     stock_name   VARCHAR(100)  NOT NULL,
-    action       VARCHAR(10)   NOT NULL CHECK (action IN ('매수', '매도')),
+    action       VARCHAR(10)   NOT NULL CHECK (action IN ('매수', '매도', '메모')),
     entry_price  INTEGER       NOT NULL CHECK (entry_price > 0),   -- 진입 단가 (원)
     exit_price   INTEGER       CHECK (exit_price > 0),             -- 청산 단가 (매도 시)
     quantity     INTEGER       NOT NULL CHECK (quantity > 0),       -- 수량 (주)

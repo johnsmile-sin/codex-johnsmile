@@ -1,6 +1,7 @@
 """
 Supabase 연결 클라이언트
 - .env 에서 SUPABASE_URL, SUPABASE_ANON_KEY 를 읽는다.
+- MOCK_MODE=true 이면 Supabase 키가 있어도 Mock 모드로 실행한다.
 - 둘 중 하나라도 없으면 Mock 모드로 전환된다.
 - 모듈 임포트 시 1회만 연결을 시도한다.
 """
@@ -18,11 +19,20 @@ _connected: bool = False
 _error_message: str = ""
 
 
+def _is_mock_mode() -> bool:
+    return os.getenv("MOCK_MODE", "false").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 def _init() -> None:
     global _client, _connected, _error_message
 
     url = os.getenv("SUPABASE_URL", "").strip()
     key = os.getenv("SUPABASE_ANON_KEY", "").strip()
+
+    if _is_mock_mode():
+        _error_message = "MOCK_MODE=true"
+        logger.info("[Supabase] MOCK_MODE=true → Mock 모드로 실행합니다.")
+        return
 
     # 환경변수 누락 → Mock 모드
     if not url or not key:

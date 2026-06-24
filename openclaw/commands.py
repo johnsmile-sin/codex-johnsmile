@@ -18,6 +18,12 @@ import os
 from datetime import date
 from typing import Any
 
+# Windows cp949 터미널에서 이모지/한글 출력 오류 방지
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 # 패키지 루트를 sys.path에 추가 (어디서 실행하든 import 가능)
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:

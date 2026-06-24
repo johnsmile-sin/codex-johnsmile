@@ -71,6 +71,37 @@ def _badge(label: str) -> str:
         f"padding:2px 10px;border-radius:6px;font-weight:bold'>{label}</span>"
     )
 
+
+def _change_rate_color(value: float) -> str:
+    if value > 0:
+        return "#E74C3C"
+    if value < 0:
+        return "#2980B9"
+    return "#7F8C8D"
+
+
+def _change_rate_icon(value: float) -> str:
+    if value > 0:
+        return "▲"
+    if value < 0:
+        return "▼"
+    return "－"
+
+
+def _change_rate_badge(value: float) -> str:
+    color = _change_rate_color(value)
+    return (
+        f"<span style='display:inline-block;color:{color};background:{color}18;"
+        f"border:1px solid {color};padding:3px 10px;border-radius:999px;"
+        f"font-weight:700;font-size:14px'>{_change_rate_icon(value)} {value:+.2f}%</span>"
+    )
+
+
+def _style_change_rate(value: float) -> str:
+    color = _change_rate_color(value)
+    return f"color:{color};background-color:{color}18;font-weight:700"
+
+
 def _merge_with_market(scored: pd.DataFrame, market: pd.DataFrame) -> pd.DataFrame:
     extra = market[["stock_code", "market", "sector",
                     "current_price", "change_rate",
@@ -99,7 +130,7 @@ def render_candidates(market_df: pd.DataFrame, scored_df: pd.DataFrame) -> None:
     btn_col1, btn_col2, _ = st.columns([1, 1, 4])
 
     with btn_col1:
-        if st.button("💾 점수 저장", use_container_width=True, type="primary"):
+        if st.button("💾 점수 저장", width="stretch", type="primary"):
             _save_scores(merged)
 
     with btn_col2:
@@ -135,15 +166,17 @@ def render_candidates(market_df: pd.DataFrame, scored_df: pd.DataFrame) -> None:
         "점수", "판단", "뉴스",
         "매수 이유", "리스크",
     ]
+    styled_table = (
+        table.style
+        .format({"현재가": "{:,.0f}원", "등락률(%)": "{:+.2f}%", "거래대금(억)": "{:,.1f}"})
+        .map(_style_change_rate, subset=["등락률(%)"])
+    )
 
     st.dataframe(
-        table,
-        use_container_width=True,
+        styled_table,
+        width="stretch",
         height=420,
         column_config={
-            "현재가":      st.column_config.NumberColumn("현재가",      format="%d원"),
-            "등락률(%)":  st.column_config.NumberColumn("등락률(%)",   format="%.2f%%"),
-            "거래대금(억)":st.column_config.NumberColumn("거래대금(억)",format="%.1f"),
             "점수":        st.column_config.ProgressColumn("점수", min_value=0, max_value=100, format="%d"),
             "뉴스":        st.column_config.NumberColumn("뉴스",        format="%d건"),
         },
@@ -172,7 +205,7 @@ def render_candidates(market_df: pd.DataFrame, scored_df: pd.DataFrame) -> None:
             margin=dict(l=0, r=40, t=10, b=0),
             xaxis=dict(range=[0, 105]),
         )
-        st.plotly_chart(fig_bar, use_container_width=True)
+        st.plotly_chart(fig_bar, width="stretch")
 
     with chart_r:
         st.subheader("🎯 판단별 종목 분포")
@@ -195,7 +228,7 @@ def render_candidates(market_df: pd.DataFrame, scored_df: pd.DataFrame) -> None:
             showlegend=True,
             margin=dict(l=0, r=0, t=10, b=0),
         )
-        st.plotly_chart(fig_pie, use_container_width=True)
+        st.plotly_chart(fig_pie, width="stretch")
 
 
 def _save_scores(merged: pd.DataFrame) -> None:
@@ -239,14 +272,13 @@ def render_report(market_df: pd.DataFrame, scored_df: pd.DataFrame) -> None:
 
     with info_col:
         color     = DECISION_COLOR.get(row["decision"], "#888")
-        chg_icon  = "▲" if row["change_rate"] >= 0 else "▼"
-        chg_color = "#E74C3C" if row["change_rate"] >= 0 else "#2980B9"
+        chg_badge = _change_rate_badge(float(row["change_rate"]))
         st.markdown(
             f"<div style='margin-top:4px;padding:10px 14px;border-radius:10px;border:1px solid #ddd'>"
             f"<b style='font-size:17px'>{row['stock_name']}</b> "
             f"<span style='color:#999;font-size:12px'>{code} | {row['market']} | {row['sector']}</span><br>"
             f"<span style='font-size:22px;font-weight:bold'>{row['current_price']:,}원</span> "
-            f"<span style='color:{chg_color}'>{chg_icon} {row['change_rate']:+.2f}%</span>"
+            f"{chg_badge}"
             f"&nbsp;&nbsp;<span style='background:{color};color:#fff;padding:2px 12px;"
             f"border-radius:6px;font-size:13px;font-weight:bold'>{row['decision']} {row['score']}점</span>"
             f"</div>",
@@ -338,7 +370,7 @@ def _render_report_generator(mrow: pd.Series, row: pd.Series, code: str) -> None
                 showlegend=False, height=280,
                 margin=dict(l=30, r=30, t=10, b=10),
             )
-            st.plotly_chart(fig_r, use_container_width=True)
+            st.plotly_chart(fig_r, width="stretch")
 
     st.divider()
 
@@ -380,7 +412,7 @@ def _render_report_generator(mrow: pd.Series, row: pd.Series, code: str) -> None
         gen_clicked = st.button(
             "📋 리포트 생성 및 저장",
             type="primary",
-            use_container_width=True,
+            width="stretch",
             key=f"gen_btn_{code}",
         )
 
@@ -603,7 +635,7 @@ def render_news(market_df: pd.DataFrame) -> None:
             height=200, showlegend=False,
             margin=dict(l=0, r=40, t=10, b=0),
         )
-        st.plotly_chart(fig_dist, use_container_width=True)
+        st.plotly_chart(fig_dist, width="stretch")
 
     # ── 뉴스 목록 ─────────────────────────────────────────────
     st.subheader(f"뉴스 목록  ({len(filtered)}건)")
@@ -679,7 +711,7 @@ def render_trade_journal(market_df: pd.DataFrame) -> None:
                 return_rate = round((exit_price - entry_price) / entry_price * 100, 2)
                 st.info(f"예상 수익률: **{return_rate:+.2f}%**")
 
-            submitted = st.form_submit_button("💾 등록", use_container_width=True)
+            submitted = st.form_submit_button("💾 등록", width="stretch")
 
         if submitted:
             save_trade_journal({
@@ -726,7 +758,7 @@ def render_trade_journal(market_df: pd.DataFrame) -> None:
         }
         st.dataframe(
             df_t[show_cols].rename(columns=rename),
-            use_container_width=True,
+            width="stretch",
             height=400,
         )
 
@@ -758,7 +790,7 @@ with st.sidebar:
     st.divider()
 
     # 새로고침
-    if st.button("🔄 데이터 새로고침", use_container_width=True):
+    if st.button("🔄 데이터 새로고침", width="stretch"):
         st.cache_data.clear()
         st.session_state["refresh_key"] += 1
         st.rerun()
