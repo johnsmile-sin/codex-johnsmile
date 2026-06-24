@@ -1,0 +1,87 @@
+# ─── 환경변수 (절대 커밋 금지) ───────────────────────────────
+.env
+.env.local
+.env.*.local
+.env.production
+.env.staging
+# .env.example 은 커밋 허용 (민감 정보 없음)
+
+# ─── Python ──────────────────────────────────────────────────
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyw
+.Python
+*.egg-info/
+*.egg
+.eggs/
+dist/
+build/
+MANIFEST
+
+# ─── 가상환경 ─────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+.env_backup/
+
+# ─── 테스트 · 커버리지 ────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+*.coveragerc
+
+# ─── 타입 체크 ───────────────────────────────────────────────
+.mypy_cache/
+.dmypy.json
+
+# ─── Jupyter ─────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+# ─── 로그 ────────────────────────────────────────────────────
+*.log
+logs/
+log/
+
+# ─── 데이터 캐시 · 임시 파일 ──────────────────────────────────
+.cache/
+*.pkl
+*.pickle
+*.parquet
+*.feather
+*.h5
+*.hdf5
+*.npy
+*.npz
+
+# ─── 데이터베이스 ────────────────────────────────────────────
+*.db
+*.sqlite
+*.sqlite3
+
+# ─── IDE ─────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ─── OS ──────────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+desktop.ini
+
+# ─── 분석 결과 · 출력 파일 (필요 시 직접 커밋) ──────────────
+output/
+reports/
+exports/
