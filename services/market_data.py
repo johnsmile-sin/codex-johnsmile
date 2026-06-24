@@ -1,13 +1,27 @@
 """
-샘플 시장 데이터 생성 모듈
-get_sample_market_data() → pandas DataFrame (30종목)
+시장 데이터 서비스
+- get_stock_master()              : 종목 마스터 목록 (Supabase → 샘플 폴백)
+- save_stock_master_to_supabase() : 샘플 30종목을 Supabase stocks 테이블에 저장
+- load_stock_master_from_supabase(): Supabase stocks 테이블에서 로드
+- get_stock_by_name(name)         : 종목명 부분 검색
+- get_stock_by_code(code)         : 종목코드 정확 검색
+- get_market_data()               : 시세 DataFrame (FDR 실제 → Mock 폴백)
+- get_sample_market_data()        : Mock 전용 (하위 호환)
 
-수치는 고정 시드(42)를 사용해 항상 동일한 값을 반환합니다.
-실제 API 연동 전 UI/로직 테스트에 사용합니다.
+data_source 컬럼으로 데이터 출처를 추적합니다:
+    "실제 데이터 (FinanceDataReader)" | "Mock 데이터 (샘플)"
 """
+
+from __future__ import annotations
+
+import logging
+from datetime import date
+from typing import Any
 
 import numpy as np
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 # ── 종목 마스터 정의 ──────────────────────────────────────────
 # (code, name, market, sector, base_price, avg_vol, per_mid, pbr_mid, roe_mid, debt_mid)
@@ -59,6 +73,146 @@ _STOCK_MASTER = [
 ]
 
 
+# ── 종목 마스터 (4개 기본 필드) ──────────────────────────────────
+# _STOCK_MASTER 튜플에서 (code, name, market, sector)만 추출한 뷰
+_MASTER_DICTS: list[dict[str, str]] = [
+    {"stock_code": code, "stock_name": name, "market": market, "sector": sector}
+    for code, name, market, sector, *_ in _STOCK_MASTER
+]
+
+
+# ════════════════════════════════════════════════════════════════
+# 종목 마스터 관리 함수
+# ════════════════════════════════════════════════════════════════
+
+def get_stock_master() -> list[dict[str, str]]:
+    """
+    종목 마스터 목록을 반환합니다.
+    Supabase가 연결되어 있으면 stocks 테이블에서 로드하고,
+    없으면 내장 샘플 30종목을 반환합니다.
+
+    Returns:
+        [{"stock_code", "stock_name", "market", "sector"}, ...]
+    """
+    loaded = load_stock_master_from_supabase()
+    if loaded:
+        return loaded
+    logger.info("[master] Supabase 미연결 → 샘플 30종목 반환")
+    return list(_MASTER_DICTS)
+
+
+def save_stock_master_to_supabase() -> dict[str, Any]:
+    """
+    내장 샘플 30종목을 Supabase stocks 테이블에 upsert합니다.
+    이미 존재하는 종목(stock_code 기준)은 이름·시장·섹터를 갱신합니다.
+
+    Returns:
+        {"saved": int, "skipped": int, "error": str | None}
+    """
+    try:
+        from services.supabase_client import get_client, is_connected
+    except ImportError:
+        return {"saved": 0, "skipped": 0, "error": "supabase 패키지 없음"}
+
+    if not is_connected():
+        return {"saved": 0, "skipped": 0, "error": "Supabase 미연결"}
+
+    client = get_client()
+    saved = 0
+    skipped = 0
+
+    for item in _MASTER_DICTS:
+        try:
+            client.table("stocks").upsert(
+                item,
+                on_conflict="stock_code",
+            ).execute()
+            saved += 1
+        except Exception as e:
+            logger.warning("[master] upsert 실패 %s: %s", item["stock_code"], e)
+            skipped += 1
+
+    logger.info("[master] Supabase 저장 완료: %d건 성공, %d건 실패", saved, skipped)
+    return {"saved": saved, "skipped": skipped, "error": None}
+
+
+def load_stock_master_from_supabase() -> list[dict[str, str]]:
+    """
+    Supabase stocks 테이블에서 종목 마스터를 로드합니다.
+    연결 실패 또는 데이터 없으면 빈 리스트를 반환합니다.
+
+    Returns:
+        [{"stock_code", "stock_name", "market", "sector"}, ...]
+        실패 시: []
+    """
+    try:
+        from services.supabase_client import get_client, is_connected
+    except ImportError:
+        return []
+
+    if not is_connected():
+        return []
+
+    try:
+        resp = (
+            get_client()
+            .table("stocks")
+            .select("stock_code, stock_name, market, sector")
+            .order("stock_code")
+            .execute()
+        )
+        rows = resp.data or []
+        logger.info("[master] Supabase 로드: %d종목", len(rows))
+        return rows
+    except Exception as e:
+        logger.warning("[master] Supabase 로드 실패: %s", e)
+        return []
+
+
+def get_stock_by_name(stock_name: str) -> list[dict[str, str]]:
+    """
+    종목명으로 부분 검색합니다 (대소문자 구분 없음).
+
+    Args:
+        stock_name: 검색할 종목명 (부분 일치)
+
+    Returns:
+        일치하는 종목 목록. 없으면 []
+    """
+    if not stock_name or not stock_name.strip():
+        return []
+
+    keyword = stock_name.strip().lower()
+    master  = get_stock_master()
+
+    return [
+        item for item in master
+        if keyword in item["stock_name"].lower()
+    ]
+
+
+def get_stock_by_code(stock_code: str) -> dict[str, str] | None:
+    """
+    종목코드로 정확히 검색합니다.
+
+    Args:
+        stock_code: 6자리 종목코드 (예: "005930")
+
+    Returns:
+        {"stock_code", "stock_name", "market", "sector"} 또는 None
+    """
+    if not stock_code or not stock_code.strip():
+        return None
+
+    code   = stock_code.strip().zfill(6)
+    master = get_stock_master()
+
+    for item in master:
+        if item["stock_code"] == code:
+            return item
+    return None
+
+
 def _round_price(price: float) -> int:
     """한국 주식 호가 단위로 반올림"""
     if price >= 500_000:
@@ -74,6 +228,32 @@ def _round_price(price: float) -> int:
     else:
         unit = 5
     return int(round(price / unit) * unit)
+
+
+def get_market_data(force_mock: bool = False) -> pd.DataFrame:
+    """
+    메인 진입점 — 실제 데이터(FDR) 우선, 실패 시 Mock 자동 전환.
+
+    반환 DataFrame에 추가 컬럼:
+        data_source : "실제 데이터 (FinanceDataReader)" | "Mock 데이터 (샘플)"
+        ref_date    : 기준일 (YYYY-MM-DD)
+    """
+    if not force_mock:
+        try:
+            from services.data_providers.fdr_provider import is_available, fetch_all_stocks
+            if is_available():
+                logger.info("[market_data] FDR 실제 데이터 로드 시도...")
+                df = fetch_all_stocks(_STOCK_MASTER)
+                if df is not None and not df.empty:
+                    logger.info("[market_data] FDR 로드 완료: %d개 종목", len(df))
+                    return df
+        except Exception as e:
+            logger.warning("[market_data] FDR 실패, Mock으로 전환: %s", e)
+
+    df = get_sample_market_data()
+    df["data_source"] = "Mock 데이터 (샘플)"
+    df["ref_date"]    = str(date.today())
+    return df
 
 
 def get_sample_market_data() -> pd.DataFrame:
@@ -167,4 +347,8 @@ def get_sample_market_data() -> pd.DataFrame:
             "news_count":     news_count,
         })
 
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+    if "data_source" not in df.columns:
+        df["data_source"] = "Mock 데이터 (샘플)"
+        df["ref_date"]    = str(date.today())
+    return df

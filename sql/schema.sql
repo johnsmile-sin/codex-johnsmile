@@ -110,8 +110,23 @@ CREATE TABLE IF NOT EXISTS stock_reports (
     conclusion          TEXT,                    -- 최종 결론
     raw_json            JSONB,                   -- 분석 원본 데이터 전체
     created_at          TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    updated_at          TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+    updated_at          TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT uq_stock_reports_code_date UNIQUE (stock_code, report_date)
 );
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'uq_stock_reports_code_date'
+    ) THEN
+        ALTER TABLE stock_reports
+            ADD CONSTRAINT uq_stock_reports_code_date UNIQUE (stock_code, report_date);
+    END IF;
+END;
+$$;
 
 CREATE INDEX IF NOT EXISTS idx_reports_code ON stock_reports (stock_code);
 CREATE INDEX IF NOT EXISTS idx_reports_date ON stock_reports (report_date DESC);

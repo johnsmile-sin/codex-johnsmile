@@ -10,3 +10,6 @@ supabase>=2.3.0
 # 선택 패키지 (없어도 Mock 모드로 실행 가능)
 # OpenAI 뉴스 요약 기능 사용 시 설치
 openai>=1.12.0
+
+# 실제 한국 주식 데이터 (FDR) — 없으면 Mock 자동 전환
+finance-datareader>=0.9.50

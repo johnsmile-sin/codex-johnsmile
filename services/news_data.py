@@ -1,22 +1,62 @@
 """
-services/news_data.py  –  종목별 Mock 뉴스 데이터
-get_mock_news(stock_code=None, stock_name=None) → list[dict]
+services/news_data.py v2  —  종목별 뉴스 서비스
 
-각 종목당 3~5개 뉴스를 생성합니다.
-긍정/중립/부정 키워드를 섹터별로 반영합니다.
+공개 API:
+    fetch_news_from_naver(stock_name, days, max_items) → list[dict]
+    clean_news_text(text)                              → str
+    classify_news_sentiment(title, summary)            → "긍정"|"중립"|"부정"
+    summarize_news_sentiment(news_items)               → dict
+    save_news_to_supabase(news_items)                  → dict
+    get_news_for_stock(stock_code, stock_name)         → list[dict]
+
+    # 하위호환 유지
+    get_mock_news(stock_code, stock_name)              → list[dict]
+    get_news(stock_code, stock_name, display)          → list[dict]
+    get_news_summary(news)                             → dict
+
+뉴스 아이템 스키마:
+    stock_code, stock_name, title, summary,
+    sentiment, impact_score, news_date, url, source
 """
 
 from __future__ import annotations
-from datetime import date, timedelta
+
+import logging
 import random
+import re
+from datetime import date, datetime, timedelta
+from typing import Any
+
+logger = logging.getLogger(__name__)
 
 # 감성 상수
 POS = "긍정"
 NEU = "중립"
 NEG = "부정"
 
-# ── 섹터별 뉴스 템플릿 ────────────────────────────────────────
-# (title, summary, sentiment, impact_score)
+# 감성 분류 키워드
+_POS_KEYWORDS = [
+    "급등", "상승", "수주", "호실적", "어닝서프라이즈", "목표주가 상향",
+    "매수", "성장", "신고가", "수익", "흑자", "증가", "확대", "개선",
+    "반등", "회복", "긍정", "호재", "투자", "기대", "최대", "돌파",
+    "수혜", "강세", "신규", "계약", "승인", "허가", "획득", "선정",
+]
+_NEG_KEYWORDS = [
+    "급락", "하락", "매도", "목표주가 하향", "부진", "적자", "감소",
+    "악재", "손실", "위기", "우려", "리스크", "규제", "제재", "소송",
+    "공급과잉", "둔화", "약세", "하향", "취소", "연기", "폐업",
+    "실망", "충격", "쇼크", "손해", "폭락", "위반", "과징금", "벌금",
+]
+_HIGH_IMPACT_KEYWORDS = [
+    "급등", "급락", "어닝서프라이즈", "어닝쇼크", "상장폐지",
+    "신고가", "신저가", "대규모 수주", "파산", "분기 최대", "사상 최대",
+]
+
+
+# ════════════════════════════════════════════════════════════════
+# 섹터별 Mock 뉴스 템플릿
+# ════════════════════════════════════════════════════════════════
+
 _SECTOR_TEMPLATES: dict[str, list[tuple]] = {
     "반도체": [
         ("HBM3E 공급 확대… AI 서버 수요 급증", "엔비디아향 HBM3E 공급 비중이 크게 늘며 ASP 상승 기대.", POS, 5),
@@ -132,7 +172,7 @@ _SECTOR_TEMPLATES: dict[str, list[tuple]] = {
     ],
 }
 
-# ── 종목 → 섹터 매핑 ──────────────────────────────────────────
+# 종목코드 → (종목명, 섹터)
 _STOCK_SECTOR: dict[str, tuple[str, str]] = {
     "005930": ("삼성전자",         "반도체"),
     "000660": ("SK하이닉스",       "반도체"),
@@ -166,10 +206,383 @@ _STOCK_SECTOR: dict[str, tuple[str, str]] = {
     "009540": ("HD한국조선해양",   "조선"),
 }
 
-# 뉴스 날짜: 최근 7일 내 랜덤
 _TODAY = date.today()
 _DATES = [str(_TODAY - timedelta(days=i)) for i in range(7)]
 
+
+# ════════════════════════════════════════════════════════════════
+# 1. clean_news_text
+# ════════════════════════════════════════════════════════════════
+
+def clean_news_text(text: str) -> str:
+    """
+    뉴스 텍스트에서 HTML 태그, 엔티티, 불필요한 공백을 제거합니다.
+
+    Args:
+        text: 원본 텍스트 (HTML 포함 가능)
+
+    Returns:
+        정제된 텍스트 문자열
+    """
+    if not text:
+        return ""
+    # HTML 태그 제거
+    text = re.sub(r"<[^>]+>", "", text)
+    # HTML 엔티티 변환
+    _ENTITIES = {
+        "&amp;": "&", "&lt;": "<", "&gt;": ">",
+        "&quot;": '"', "&#39;": "'", "&nbsp;": " ",
+        "&#x27;": "'", "&apos;": "'",
+    }
+    for entity, char in _ENTITIES.items():
+        text = text.replace(entity, char)
+    # 남은 숫자 엔티티 (예: &#123;)
+    text = re.sub(r"&#\d+;", "", text)
+    # 연속 공백 정규화
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+# ════════════════════════════════════════════════════════════════
+# 2. classify_news_sentiment
+# ════════════════════════════════════════════════════════════════
+
+def classify_news_sentiment(title: str, summary: str = "") -> str:
+    """
+    제목·요약 키워드 기반으로 뉴스 감성을 분류합니다.
+
+    긍정/부정 키워드 등장 횟수를 비교하며,
+    동점이면 "중립"을 반환합니다.
+
+    Args:
+        title:   뉴스 제목
+        summary: 뉴스 요약 (선택)
+
+    Returns:
+        "긍정" | "중립" | "부정"
+    """
+    text = (title + " " + summary).lower()
+    pos = sum(1 for kw in _POS_KEYWORDS if kw in text)
+    neg = sum(1 for kw in _NEG_KEYWORDS if kw in text)
+    if pos > neg:
+        return POS
+    if neg > pos:
+        return NEG
+    return NEU
+
+
+def _calc_impact_score(title: str, summary: str = "") -> int:
+    """영향도 1~5 추정 (고영향 키워드 등장 수 기반)"""
+    text = title + " " + summary
+    count = sum(1 for kw in _HIGH_IMPACT_KEYWORDS if kw in text)
+    return min(5, max(1, 2 + count))
+
+
+# ════════════════════════════════════════════════════════════════
+# 3. fetch_news_from_naver
+# ════════════════════════════════════════════════════════════════
+
+def fetch_news_from_naver(
+    stock_name: str,
+    days: int = 30,
+    max_items: int = 10,
+    stock_code: str = "",
+) -> list[dict]:
+    """
+    네이버 뉴스 API로 종목 관련 최신 뉴스를 수집합니다.
+
+    NAVER_CLIENT_ID / NAVER_CLIENT_SECRET 이 없으면 빈 리스트를 반환합니다.
+    API 오류가 발생해도 앱이 중단되지 않습니다.
+
+    Args:
+        stock_name: 검색 키워드 (종목명)
+        days:       최근 N일 이내 뉴스만 포함 (기본 30일)
+        max_items:  최대 반환 건수 (기본 10)
+        stock_code: 종목코드 (메타 정보용, 선택)
+
+    Returns:
+        뉴스 딕셔너리 리스트. 각 항목에 source="Naver" 포함.
+        빈 리스트 = 키 없음 또는 오류.
+    """
+    try:
+        from config import NAVER_CLIENT_ID, NAVER_CLIENT_SECRET
+    except ImportError:
+        NAVER_CLIENT_ID = NAVER_CLIENT_SECRET = None
+
+    if not (NAVER_CLIENT_ID and NAVER_CLIENT_SECRET):
+        logger.debug("[뉴스] Naver API 키 없음 → Mock 폴백")
+        return []
+
+    import requests  # lazy import — 설치 안 돼도 safe
+
+    _API_URL = "https://openapi.naver.com/v1/search/news.json"
+    cutoff   = date.today() - timedelta(days=days)
+
+    try:
+        resp = requests.get(
+            _API_URL,
+            headers={
+                "X-Naver-Client-Id":     NAVER_CLIENT_ID,
+                "X-Naver-Client-Secret": NAVER_CLIENT_SECRET,
+            },
+            params={
+                "query":   f"{stock_name} 주식",
+                "display": min(max_items * 2, 100),  # 필터 여유분
+                "sort":    "date",
+            },
+            timeout=5,
+        )
+        resp.raise_for_status()
+        raw_items = resp.json().get("items", [])
+    except Exception as e:
+        logger.warning("[뉴스] Naver API 오류 (%s): %s", stock_name, e)
+        return []
+
+    results: list[dict] = []
+    for item in raw_items:
+        title   = clean_news_text(item.get("title",       ""))
+        summary = clean_news_text(item.get("description", ""))
+        url     = item.get("originallink", "") or item.get("link", "")
+        pub_str = item.get("pubDate", "")
+
+        # 날짜 파싱
+        news_date = _parse_pub_date(pub_str)
+
+        # days 필터
+        try:
+            if datetime.strptime(news_date, "%Y-%m-%d").date() < cutoff:
+                continue
+        except ValueError:
+            pass
+
+        if not title:
+            continue
+
+        results.append({
+            "stock_code":   stock_code,
+            "stock_name":   stock_name,
+            "title":        title,
+            "summary":      summary[:200] if summary else "",
+            "sentiment":    classify_news_sentiment(title, summary),
+            "impact_score": _calc_impact_score(title, summary),
+            "news_date":    news_date,
+            "url":          url,
+            "source":       "Naver",
+        })
+
+        if len(results) >= max_items:
+            break
+
+    logger.info("[뉴스] Naver 수집 완료: %s → %d건", stock_name, len(results))
+    return results
+
+
+def _parse_pub_date(pub_date: str) -> str:
+    """네이버 pubDate (RFC 2822) → YYYY-MM-DD"""
+    try:
+        dt = datetime.strptime(pub_date, "%a, %d %b %Y %H:%M:%S %z")
+        return str(dt.date())
+    except Exception:
+        return str(date.today())
+
+
+# ════════════════════════════════════════════════════════════════
+# 4. summarize_news_sentiment
+# ════════════════════════════════════════════════════════════════
+
+def summarize_news_sentiment(news_items: list[dict]) -> dict[str, Any]:
+    """
+    뉴스 리스트의 감성을 집계합니다.
+
+    Args:
+        news_items: get_news_for_stock() 반환 리스트
+
+    Returns:
+        {
+            "긍정": int,
+            "중립": int,
+            "부정": int,
+            "합계": int,
+            "대표_감성": "긍정" | "중립" | "부정",
+            "출처": "Naver" | "Mock" | "혼합",
+        }
+    """
+    counts = {POS: 0, NEU: 0, NEG: 0}
+    sources: set[str] = set()
+
+    for item in news_items:
+        s = item.get("sentiment", NEU)
+        if s in counts:
+            counts[s] += 1
+        src = item.get("source", "Mock")
+        sources.add(src)
+
+    total = sum(counts.values())
+
+    # 대표 감성: 최다 득표, 동점이면 중립
+    dominant = NEU
+    if total > 0:
+        sorted_counts = sorted(counts.items(), key=lambda x: x[1], reverse=True)
+        if sorted_counts[0][1] > sorted_counts[1][1]:
+            dominant = sorted_counts[0][0]
+
+    # 출처 레이블
+    if sources == {"Naver"}:
+        source_label = "Naver"
+    elif "Naver" in sources:
+        source_label = "혼합"
+    else:
+        source_label = "Mock"
+
+    return {
+        POS:         counts[POS],
+        NEU:         counts[NEU],
+        NEG:         counts[NEG],
+        "합계":      total,
+        "대표_감성": dominant,
+        "출처":      source_label,
+    }
+
+
+# ════════════════════════════════════════════════════════════════
+# 5. save_news_to_supabase
+# ════════════════════════════════════════════════════════════════
+
+def save_news_to_supabase(news_items: list[dict]) -> dict[str, Any]:
+    """
+    뉴스 아이템을 Supabase news_articles 테이블에 저장합니다.
+
+    중복 제거: (stock_code, title, news_date) 기준 upsert.
+    Supabase 미연결 또는 테이블 미생성 시 조용히 실패합니다.
+
+    Args:
+        news_items: get_news_for_stock() 반환 리스트
+
+    Returns:
+        {"saved": int, "skipped": int, "error": str | None}
+
+    Note:
+        news_articles 테이블이 없으면 Supabase에서 에러가 발생합니다.
+        sql/schema_v3.sql 을 실행해 테이블을 먼저 생성하세요.
+    """
+    if not news_items:
+        return {"saved": 0, "skipped": 0, "error": None}
+
+    try:
+        from services.supabase_client import get_client, is_connected
+        if not is_connected():
+            return {"saved": 0, "skipped": len(news_items), "error": "Supabase 미연결"}
+
+        client = get_client()
+        rows = [
+            {
+                "stock_code":   item.get("stock_code",   ""),
+                "stock_name":   item.get("stock_name",   ""),
+                "title":        item.get("title",        "")[:500],
+                "summary":      item.get("summary",      "")[:1000],
+                "sentiment":    item.get("sentiment",    NEU),
+                "impact_score": int(item.get("impact_score", 3)),
+                "news_date":    item.get("news_date",    str(date.today())),
+                "url":          item.get("url",          "")[:500],
+                "source":       item.get("source",       "Mock"),
+            }
+            for item in news_items
+            if item.get("title")
+        ]
+
+        saved = 0
+        batch_size = 30
+        for i in range(0, len(rows), batch_size):
+            batch = rows[i : i + batch_size]
+            client.table("news_articles").upsert(
+                batch,
+                on_conflict="stock_code,title,news_date",
+            ).execute()
+            saved += len(batch)
+
+        logger.info("[뉴스] Supabase 저장: %d건", saved)
+        return {"saved": saved, "skipped": 0, "error": None}
+
+    except Exception as e:
+        logger.warning("[뉴스] Supabase 저장 실패: %s", e)
+        return {"saved": 0, "skipped": len(news_items), "error": str(e)}
+
+
+# ════════════════════════════════════════════════════════════════
+# 6. get_news_for_stock  (메인 진입점)
+# ════════════════════════════════════════════════════════════════
+
+def get_news_for_stock(
+    stock_code: str | None = None,
+    stock_name: str | None = None,
+    days: int = 30,
+    max_items: int = 10,
+) -> list[dict]:
+    """
+    종목 뉴스를 수집합니다. Naver API 우선, 없으면 Mock 폴백.
+
+    우선순위:
+        1. Naver News API (NAVER_CLIENT_ID + NAVER_CLIENT_SECRET)
+        2. Mock 뉴스 (섹터별 템플릿)
+
+    모든 뉴스 항목에 source 필드("Naver" 또는 "Mock")가 포함됩니다.
+    이 필드를 UI에서 사용해 실제/Mock 데이터 여부를 표시하세요.
+
+    Args:
+        stock_code: 6자리 종목코드 (예: "005930")
+        stock_name: 종목명 (stock_code 없을 때 사용)
+        days:       최근 N일 이내 뉴스 (Naver API 필터, 기본 30일)
+        max_items:  최대 반환 건수 (기본 10)
+
+    Returns:
+        뉴스 딕셔너리 리스트, news_date 내림차순.
+        각 항목: stock_code, stock_name, title, summary,
+                 sentiment, impact_score, news_date, url, source
+    """
+    code = str(stock_code).zfill(6) if stock_code else ""
+    name = stock_name or ""
+
+    # 종목명 보완 (code → name)
+    if code and not name and code in _STOCK_SECTOR:
+        name = _STOCK_SECTOR[code][0]
+
+    # 1순위: Naver API
+    if name:
+        naver_items = fetch_news_from_naver(
+            stock_name=name,
+            days=days,
+            max_items=max_items,
+            stock_code=code,
+        )
+        if naver_items:
+            deduped = _dedup(naver_items)
+            logger.info("[뉴스] %s Naver 사용: %d건", name, len(deduped))
+            return sorted(deduped, key=lambda x: x["news_date"], reverse=True)
+
+    # 2순위: Mock
+    mock_items = get_mock_news(stock_code=code or None, stock_name=name or None)
+    logger.info("[뉴스] %s Mock 사용: %d건", name or code, len(mock_items))
+    return mock_items
+
+
+def _dedup(news_items: list[dict]) -> list[dict]:
+    """URL 또는 제목 기준 중복 제거"""
+    seen: set[str] = set()
+    result: list[dict] = []
+    for item in news_items:
+        url   = (item.get("url")   or "").strip()
+        title = (item.get("title") or "").strip()
+        key   = url if url else title
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        result.append(item)
+    return result
+
+
+# ════════════════════════════════════════════════════════════════
+# Mock 뉴스 내부 생성기
+# ════════════════════════════════════════════════════════════════
 
 def _make_news_items(
     stock_code: str,
@@ -178,19 +591,18 @@ def _make_news_items(
     count: int,
     seed: int,
 ) -> list[dict]:
-    """단일 종목의 뉴스 목록을 생성합니다."""
-    rng = random.Random(seed)
+    rng       = random.Random(seed)
     templates = _SECTOR_TEMPLATES.get(sector, _SECTOR_TEMPLATES["IT서비스"])
-
-    # count개 선택 (중복 없이, 부족하면 반복 허용)
-    chosen = rng.sample(templates, min(count, len(templates)))
+    chosen    = rng.sample(templates, min(count, len(templates)))
     if len(chosen) < count:
         chosen += rng.choices(templates, k=count - len(chosen))
 
     items = []
-    for i, (title, summary, sentiment, impact_score) in enumerate(chosen):
-        # 종목명 삽입: 특정 제목은 종목명으로 시작하지 않으므로 앞에 붙임
-        full_title = f"{stock_name}, {title[0].lower()}{title[1:]}" if rng.random() > 0.4 else title
+    for title, summary, sentiment, impact_score in chosen:
+        full_title = (
+            f"{stock_name}, {title[0].lower()}{title[1:]}"
+            if rng.random() > 0.4 else title
+        )
         items.append({
             "stock_code":   stock_code,
             "stock_name":   stock_name,
@@ -200,43 +612,26 @@ def _make_news_items(
             "impact_score": impact_score,
             "news_date":    rng.choice(_DATES),
             "url":          "",
+            "source":       "Mock",
         })
     return items
 
+
+# ════════════════════════════════════════════════════════════════
+# 하위호환 공개 함수 (기존 코드 호환)
+# ════════════════════════════════════════════════════════════════
 
 def get_mock_news(
     stock_code: str | None = None,
     stock_name: str | None = None,
 ) -> list[dict]:
-    """
-    종목별 Mock 뉴스 데이터를 반환합니다.
-
-    Args:
-        stock_code: 종목코드 (예: "005930"). None이면 전체 반환.
-        stock_name: 종목명으로 필터 (stock_code 우선).
-
-    Returns:
-        뉴스 딕셔너리 리스트, news_date 내림차순 정렬.
-        각 항목: stock_code, stock_name, title, summary,
-                 sentiment, impact_score, news_date, url
-
-    Example:
-        from services.news_data import get_mock_news
-
-        # 전체 뉴스
-        all_news = get_mock_news()
-
-        # 삼성전자 뉴스만
-        sam_news = get_mock_news(stock_code="005930")
-        print(len(sam_news))  # 3~5
-    """
-    # 단일 종목 필터
+    """Mock 뉴스 반환 (하위호환). source="Mock" 포함."""
     if stock_code:
         if stock_code not in _STOCK_SECTOR:
             return []
         name, sector = _STOCK_SECTOR[stock_code]
-        seed = int(stock_code) % 9999
-        count = (seed % 3) + 3  # 3~5개
+        seed  = int(stock_code) % 9999
+        count = (seed % 3) + 3
         return sorted(
             _make_news_items(stock_code, name, sector, count, seed),
             key=lambda x: x["news_date"],
@@ -251,30 +646,33 @@ def get_mock_news(
         }
         if not matched:
             return []
-        code, (nm, sec) = next(iter(matched.items()))
+        code, _ = next(iter(matched.items()))
         return get_mock_news(stock_code=code)
 
-    # 전체 종목 생성
     all_news: list[dict] = []
     for code, (name, sector) in _STOCK_SECTOR.items():
-        seed = int(code) % 9999
+        seed  = int(code) % 9999
         count = (seed % 3) + 3
         all_news.extend(_make_news_items(code, name, sector, count, seed))
-
     return sorted(all_news, key=lambda x: x["news_date"], reverse=True)
 
 
-def get_news_summary(news: list[dict]) -> dict[str, int]:
-    """
-    뉴스 리스트의 감성별 건수를 집계합니다.
+def get_news(
+    stock_code: str | None = None,
+    stock_name: str | None = None,
+    display: int = 10,
+) -> list[dict]:
+    """실 뉴스 우선 조회 (하위호환). get_news_for_stock() 위임."""
+    return get_news_for_stock(
+        stock_code=stock_code,
+        stock_name=stock_name,
+        max_items=display,
+    )
 
-    Returns:
-        {"긍정": N, "중립": N, "부정": N, "합계": N}
-    """
-    counts = {POS: 0, NEU: 0, NEG: 0}
-    for item in news:
-        s = item.get("sentiment", NEU)
-        if s in counts:
-            counts[s] += 1
-    counts["합계"] = sum(counts.values())
-    return counts
+
+def get_news_summary(news: list[dict]) -> dict[str, int]:
+    """감성별 건수 집계 (하위호환). summarize_news_sentiment() 위임."""
+    s = summarize_news_sentiment(news)
+    return {POS: s[POS], NEU: s[NEU], NEG: s[NEG], "합계": s["합계"]}
+
+
